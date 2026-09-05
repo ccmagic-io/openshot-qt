@@ -1202,6 +1202,21 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
             error_msg = f"Unable to open the Download url: {url}"
             QMessageBox.information(self, "Error", error_msg)
             log.error(error_msg, exc_info=1)
+            
+    def actionAIToolsSettings_trigger(self, checked=True):
+        """Show CCMagic Settings dialog"""
+        log.info("CCMagic Settings clicked")
+        from windows.ai_tools_settings import AIToolsSettingsDialog
+        win = AIToolsSettingsDialog(self)
+        win.exec_()
+
+    def actionAIWorkflow_trigger(self, checked=True):
+        """Show AI Workflow dialog"""
+        log.info("AI Workflow clicked")
+        from windows.ai_workflow import AIWorkflowDialog
+        win = AIWorkflowDialog(self)
+        win.resize(1366, 768)
+        win.exec_()
 
     def should_play(self, requested_speed=0):
         """Determine if we should start playback, based on the current frame
