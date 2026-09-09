@@ -16,3 +16,4 @@ openshot_qt/
 /src/images/cache/objectdetection.png
 /src/images/cache/objectdetection@2x.png
 doc/locale/.doctrees/
+src/OpenShot_Video_Editor.egg-info
