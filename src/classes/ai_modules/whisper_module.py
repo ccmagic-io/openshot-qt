@@ -1,5 +1,3 @@
-from unittest import result
-
 from qt_api import (
     QDialog, QDialogButtonBox, QFormLayout, QVBoxLayout, QHBoxLayout,
     QLabel, QRadioButton, QComboBox, QPushButton, QLineEdit, QFileDialog,
@@ -12,6 +10,7 @@ from classes.ai_languages import AI_Languages
 from classes.ai_gateway_conn import AI_Gateway_Conn
 
 import os
+import sys
 import tempfile
 from datetime import date, datetime, timedelta
 import json

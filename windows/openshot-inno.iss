@@ -5,7 +5,7 @@
 
 [Setup]
 AppName=Openshot-CCMagic
-AppVersion=v0.1
+AppVersion=b0.1
 WizardStyle=modern dynamic
 DefaultDirName={autopf}\Openshot-CCMagic
 DefaultGroupName=Openshot-AI
@@ -15,14 +15,14 @@ SolidCompression=yes
 OutputDir=userdocs:Inno Setup Examples Output
 OutputBaseFilename=openshot_ccmagic_setup
 AllowNoIcons=yes
-SetupIconFile="C:\msys64\home\Edsel\openshot.github\openshot-qt\xdg\openshot-qt.ico
+SetupIconFile="../xdg/openshot-qt.ico"
 
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "C:\msys64\home\Edsel\openshot.github\openshot-qt\build\exe.mingw_x86_64_msvcrt_gnu-3.14\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "../build/exe.mingw_x86_64_msvcrt_gnu-3.14/*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Openshot-CCMagic"; Filename: "{app}\launch.exe"
