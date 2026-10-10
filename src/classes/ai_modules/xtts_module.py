@@ -26,7 +26,7 @@ class XTTSModule(BaseModule):
     footer_coin = True;
 
     def __init__(self):
-        super().__init__("XTTS", size=(120, 80))
+        super().__init__("Text To Speech", size=(120, 80))
         self.inputs = [(0, 30, "Text"), (0, 50, "Reference Path")]  # Inputs on the left
         self.outputs = [(120, 30, "Audio")]
         self._create_ports()

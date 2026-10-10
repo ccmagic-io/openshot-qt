@@ -22,13 +22,13 @@ import time
 
 class WhisperModule(BaseModule):
 
-    panelText = "Whisper ASR"
+    panelText = "Audio to Text ASR"
     category = "CCMagic AI Modules"
     footer_text = " 1 Token"
     footer_coin = True;
 
     def __init__(self):
-        super().__init__("Whisper ASR", size=(120, 120))
+        super().__init__("Audio to Text ASR", size=(120, 120))
         self.inputs = [(0, 30, "Audio Path")]
         self.outputs = [(120, 20, "txt"),(120, 40, "srt"),(120, 60, "vtt"),(120, 80, "json"),(120, 100, "tsv")]  # Outputs on the right
         self._create_ports()

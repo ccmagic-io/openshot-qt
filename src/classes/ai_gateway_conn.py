@@ -104,6 +104,20 @@ class AI_Gateway_Conn:
             if error_callback:
                 error_callback(str(e))
 
+    def nllb_task(self, data, success_callback=None, error_callback=None):
+        try:
+            if not isinstance(data, dict):
+                raise ValueError("Data must be a dictionary.")
+            if not self.check_apikey():
+                raise ValueError("API key is required to run this AI task.")
+            """Submit a nllb task to the AI gateway."""
+            curl_cmd = f"curl -s -X POST {self.url}/api/nllb -H \"Authorization: Bearer {self.apikey}\" -F \"text=\'{data.get('text')}\'\" -F \"src_lang={data.get('src_lang')}\" -F \"des_lang={data.get('des_lang')}\""
+            CurlThreadRunner.run(curl_cmd, success_callback, error_callback)
+        except Exception as e:
+            log.error(f"Error in nllb_task: {e}")
+            if error_callback:
+                error_callback(str(e))
+
 class CurlWorker(QObject):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)

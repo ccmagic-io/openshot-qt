@@ -1505,5 +1505,13 @@
     "value": "100",
     "type": "hidden",
     "restart": false
+  },
+  {
+    "category": "AI Tools",
+    "title": "AI Server API Key",
+    "setting": "ai-server-apikey",
+    "value": "",
+    "type": "text",
+    "restart": false
   }
 ]
