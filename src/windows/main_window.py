@@ -45,8 +45,9 @@ from qt_api import (
     Qt, pyqtSignal, pyqtSlot, QCoreApplication, QTimer, QDateTime,
     QFileInfo, QEvent, QUrl, QLocale
 )
-from qt_api import QIcon, QCursor, QKeySequence, QTextCursor
+from qt_api import QIcon, QCursor, QKeySequence, QTextCursor, QMouseEvent
 from qt_api import show_open_file_dialog, show_save_file_dialog, file_exists, ensure_extension, path_basename
+from qt_api import is_content_uri
 from qt_api import (
     QMainWindow, QWidget, QDockWidget,
     QApplication, QMenu, QMessageBox, QDialog, QFileDialog, QInputDialog,
@@ -58,6 +59,7 @@ from qt_api import (
 
 from classes import exceptions, info, qt_types, sentry, ui_util, updates, tabstops
 from classes.app import get_app
+from classes.feedback import record_feedback_action
 from classes.exporters.edl import export_edl
 from classes.exporters.final_cut_pro import export_xml
 from classes.importers.edl import import_edl
@@ -202,6 +204,8 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
             log.debug("Already shutting down, skipping the shutdown routine")
             return
         self.shutting_down = True
+        if getattr(self, "feedback_controller", None):
+            self.feedback_controller.shutdown()
 
         # Log the exit routine
         log.info('---------------- Shutting down -----------------')
@@ -253,10 +257,6 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
             self.generation_service.cleanup_temp_files()
         if getattr(self, "proxy_service", None):
             self.proxy_service.shutdown()
-
-        # Stop ZMQ polling thread (if any)
-        if app.logger_libopenshot:
-            app.logger_libopenshot.kill()
 
         # Process any queued events
         QCoreApplication.processEvents()
@@ -683,6 +683,18 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
         # First check for empty file_path (probably user cancellation)
         if not file_path:
             # Ignore the request
+            return
+
+        # Reject media passed through Open Project (including command-line
+        # arguments) before clearing the current project or its temporary files.
+        # Include backups created by JsonDataStore.make_repair_backup.
+        # Android document URIs do not expose a filename extension.
+        if not is_content_uri(file_path) and not re.search(
+                r"\.osp(?:\.bak(?:\.[0-9]+)?)?\Z", os.path.basename(file_path), re.IGNORECASE):
+            QMessageBox.warning(
+                self,
+                _("Invalid Project File"),
+                _("Please select an OpenShot project (.osp). To add video, audio, or images, use Import Files."))
             return
 
         # Stop preview thread
@@ -1195,29 +1207,12 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
             log.error(error_msg, exc_info=1)
 
     def actionUpdate_trigger(self, checked=True):
+        return self.update_notifications.activate()
+
+    def open_update_download(self):
         url = "https://www.openshot.org/%sdownload/?app-toolbar" % info.website_language()
-        try:
-            webbrowser.open(url, new=1)
-        except Exception:
-            error_msg = f"Unable to open the Download url: {url}"
-            QMessageBox.information(self, "Error", error_msg)
-            log.error(error_msg, exc_info=1)
-            
-    def actionAIToolsSettings_trigger(self, checked=True):
-        """Show CCMagic Settings dialog"""
-        log.info("CCMagic Settings clicked")
-        from windows.ai_tools_settings import AIToolsSettingsDialog
-        win = AIToolsSettingsDialog(self)
-        win.exec_()
-
-    def actionAIWorkflow_trigger(self, checked=True):
-        """Show AI Workflow dialog"""
-        log.info("AI Workflow clicked")
-        from windows.ai_workflow import AIWorkflowDialog
-        win = AIWorkflowDialog(self)
-        win.resize(1366, 768)
-        win.exec_()
-
+        return webbrowser.open(url, new=1)
+    
     def should_play(self, requested_speed=0):
         """Determine if we should start playback, based on the current frame
         and the total number of frames in our timeline clips. For example,
@@ -2542,6 +2537,7 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
             if profile_changed:
                 # Export dialog settings are profile-dependent; reset cache on profile changes.
                 get_app().updates.update(["export_settings"], None)
+                record_feedback_action("profile")
 
             # Clear transaction id
             get_app().updates.transaction_id = None
@@ -2823,10 +2819,16 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
 
     def actionRippleSliceKeepLeft(self):
         """Slice and keep the left side of a clip/transition, and then ripple the position change to the right."""
+        razor = getattr(self.timeline, "razor_ripple_at_cursor", None)
+        if razor and razor(True):
+            return
         self.slice_clips(MenuSlice.KEEP_LEFT, selected_only=True, ripple=True)
 
     def actionRippleSliceKeepRight(self):
         """Slice and keep the right side of a clip/transition, and then ripple the position change to the right."""
+        razor = getattr(self.timeline, "razor_ripple_at_cursor", None)
+        if razor and razor(False):
+            return
         self.slice_clips(MenuSlice.KEEP_RIGHT, selected_only=True, ripple=True)
 
     def actionProperties_trigger(self):
@@ -4321,38 +4323,16 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
 
     def foundCurrentVersion(self, version):
         """Handle the callback for detecting the current version on openshot.org"""
-        _ = get_app()._tr
-
-        # Compare versions (alphabetical compare of version strings should work fine)
-        if info.VERSION < version:
-            # Update text for QAction
-            self.actionUpdate.setVisible(True)
-            self.actionUpdate.setText(_("Update Available"))
-            self.actionUpdate.setToolTip(_("Update Available: <b>%s</b>") % version)
-
-            # Add toolbar button for non-cosmic dusk themes
-            # Cosmic dusk has a hidden toolbar button which is made visible
-            # by the setVisible() call above this
-            if get_app().theme_manager:
-                from themes.manager import ThemeName
-                theme = get_app().theme_manager.get_current_theme()
-                if theme and theme.name != ThemeName.COSMIC.value:
-                    # Add spacer and 'New Version Available' toolbar button (default hidden)
-                    spacer = QWidget(self)
-                    spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-                    self.toolBar.addWidget(spacer)
-
-                    # Add update available button (with icon and text)
-                    updateButton = QToolButton(self)
-                    updateButton.setDefaultAction(self.actionUpdate)
-                    updateButton.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-                    self.toolBar.addWidget(updateButton)
-            else:
-                log.warning("No ThemeManager loaded yet. Skip update available button.")
+        self.show_update_notice(version)
 
         # Initialize sentry exception tracing (now that we know the current version)
         from classes import sentry
         sentry.init_tracing()
+
+    def show_update_notice(self, version):
+        """Show updates in the shared banner area, without a duplicate toolbar button."""
+        if hasattr(self, "update_notifications"):
+            self.update_notifications.offer(version)
 
     def handleSeek(self, frame, _start_preroll=True):
         """ Always update the property view when we seek to a new position """
@@ -4679,7 +4659,8 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
                     try:
                         keyframes_deleted = bool(timeline_widget.delete_selected_keyframes())
                     except Exception:
-                        keyframes_deleted = False
+                        log.exception("Unable to delete selected keyframes")
+                        return
                 if keyframes_deleted:
                     self.refreshFrameSignal.emit()
                     return
@@ -4974,6 +4955,7 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
 
         if (isinstance(obj, QTabBar)
                 and event.type() == QEvent.MouseButtonRelease
+                and isinstance(event, QMouseEvent)
                 and event.button() == Qt.MiddleButton):
             if self._close_dock_tab_from_middle_click(obj, event):
                 return True
@@ -5385,6 +5367,10 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
         # Add window as watcher to receive undo/redo status updates
         app.updates.add_watcher(self)
 
+        from windows.notifications import UpdateNotificationController
+        self.update_notifications = UpdateNotificationController(
+            self, s, _, info.VERSION, self.open_update_download, preview=info.UPDATE_PREVIEW)
+
         # Get current version of OpenShot via HTTP
         self.FoundVersionSignal.connect(self.foundCurrentVersion)
         get_current_Version()
@@ -5716,6 +5702,8 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
         self.initialized = True
 
         # Init all Keyboard shortcuts
+        from windows.feedback import FeedbackController
+        self.feedback_controller = FeedbackController(self, s, _, preview=info.FEEDBACK_PREVIEW)
         self.initShortcuts()
 
         # Apply accessibility-friendly tab order after layout settles
@@ -5727,6 +5715,8 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
         )
         self._schedule_initial_focus()
         self._install_focus_debugger()
+        if info.UPDATE_PREVIEW:
+            QTimer.singleShot(0, lambda: self.show_update_notice(info.VERSION))
 
     def _init_ui_trace_recorder(self):
         """Enable env-configured UI trace recording for automated test capture."""
@@ -5801,3 +5791,18 @@ class MainWindow(updates.UpdateWatcher, QMainWindow):
         log.info("Tab chain (debug): %s", " | ".join(
             [w.objectName() or w.__class__.__name__ for w in chain]
         ))
+
+    def actionAIToolsSettings_trigger(self, checked=True):
+        """Show CCMagic Settings dialog"""
+        log.info("CCMagic Settings clicked")
+        from windows.ai_tools_settings import AIToolsSettingsDialog
+        win = AIToolsSettingsDialog(self)
+        win.exec_()
+
+    def actionAIWorkflow_trigger(self, checked=True):
+        """Show AI Workflow dialog"""
+        log.info("AI Workflow clicked")
+        from windows.ai_workflow import AIWorkflowDialog
+        win = AIWorkflowDialog(self)
+        win.resize(1366, 768)
+        win.exec_()

@@ -45,6 +45,7 @@ if PATH not in sys.path:
     sys.path.append(PATH)
 
 from qt_api import QByteArray, QCoreApplication, QEvent, QKeySequence, Qt
+from qt_api import QContextMenuEvent, QMouseEvent, QPoint, QPointF, QTabBar
 from qt_api import QApplication, QDockWidget, QMainWindow, QMenu, QStandardItem, QStandardItemModel
 
 from classes import qt_types
@@ -190,11 +191,6 @@ class MainWindowTests(unittest.TestCase):
         cls.properties_tableview_module = importlib.import_module("windows.views.properties_tableview")
         cls.properties_model_module = importlib.import_module("windows.models.properties_model")
 
-    @classmethod
-    def tearDownClass(cls):
-        if getattr(cls, "_owns_app", False) and cls.app:
-            cls.app.quit()
-
     def test_track_stack_preserves_selected_track_across_renumbering(self):
         module = self.main_window_module
         layers = [
@@ -243,28 +239,33 @@ class MainWindowTests(unittest.TestCase):
 
         button = types.SimpleNamespace(setIcon=MagicMock())
         icon_size = object()
-        action_play = object()
+        action_play = MagicMock()
         toolbar = types.SimpleNamespace(
             widgetForAction=lambda action: button if action is action_play else None,
             iconSize=lambda: icon_size,
         )
         theme = CosmicTheme.__new__(CosmicTheme)
         theme.app = types.SimpleNamespace(
-            window=types.SimpleNamespace(videoToolbar=toolbar, actionPlay=action_play)
+            window=types.SimpleNamespace(videoToolbar=toolbar, actionPlay=action_play),
+            _tr=lambda text: text,
         )
         theme.create_svg_icon = MagicMock(side_effect=["pause-icon", "play-icon"])
 
         theme.togglePlayIcon(True)
-        pause_path, pause_size = theme.create_svg_icon.call_args.args
+        pause_path, pause_size = theme.create_svg_icon.call_args[0]
         self.assertEqual(os.path.basename(pause_path), "tool-media-pause.svg")
         self.assertIs(pause_size, icon_size)
         button.setIcon.assert_called_with("pause-icon")
+        action_play.setText.assert_called_with("Pause")
+        action_play.setToolTip.assert_called_with("Pause")
 
         theme.togglePlayIcon(False)
-        play_path, play_size = theme.create_svg_icon.call_args.args
+        play_path, play_size = theme.create_svg_icon.call_args[0]
         self.assertEqual(os.path.basename(play_path), "tool-media-play.svg")
         self.assertIs(play_size, icon_size)
         button.setIcon.assert_called_with("play-icon")
+        action_play.setText.assert_called_with("Play")
+        action_play.setToolTip.assert_called_with("Play")
 
     def setUp(self):
         ensure_app_state(self.app)
@@ -439,6 +440,31 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertTrue(handled)
         event.accept.assert_called_once_with()
+
+    def test_dock_tab_event_filter_checks_mouse_event_class(self):
+        window = self.main_window_module.MainWindow.__new__(self.main_window_module.MainWindow)
+        QMainWindow.__init__(window)
+        tab_bar = QTabBar()
+        close_tab = MagicMock(return_value=True)
+        window._close_dock_tab_from_middle_click = close_tab
+        try:
+            # Reproduce an event wrapper with a release type but no button().
+            class MismatchedContextEvent(QContextMenuEvent):
+                def type(self):
+                    return QEvent.MouseButtonRelease
+
+            context = MismatchedContextEvent(QContextMenuEvent.Mouse, QPoint(0, 0))
+            self.assertFalse(window.eventFilter(tab_bar, context))
+            close_tab.assert_not_called()
+
+            for button in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
+                event = QMouseEvent(QEvent.MouseButtonRelease, QPointF(0, 0),
+                                    button, Qt.NoButton, Qt.NoModifier)
+                self.assertEqual(window.eventFilter(tab_bar, event), button == Qt.MiddleButton)
+            close_tab.assert_called_once()
+        finally:
+            window.deleteLater()
+            tab_bar.deleteLater()
 
     def test_startup_restore_uses_qt_state_without_scalar_dock_overrides(self):
         calls = []
@@ -631,6 +657,29 @@ class MainWindowTests(unittest.TestCase):
             self.main_window_module.MainWindow.actionOptimizedPreviewCancel_trigger(fake_window)
 
         self.assertEqual(proxy_calls, [("cancel", ["F1"])])
+
+    def test_open_project_rejects_media_before_modifying_current_project(self):
+        window = types.SimpleNamespace(
+            SpeedSignal=MagicMock(), PauseSignal=MagicMock(),
+            videoPreview=MagicMock(), clearSelections=MagicMock(),
+            clear_temporary_files=MagicMock(),
+        )
+        with patch.object(self.main_window_module.QMessageBox, "warning") as warning, \
+                patch.object(self.app.project, "load") as load:
+            for filename in (
+                    "video.mp4", "video.mkv", "image.JPG", "project.osp.mp4",
+                    "project.osp.bak.mp4", "project.osp.bak.1.mp4",
+                    "project.osp.bak.extra", "project.osp.bak.",
+                    "project.osp.folder/video.mp4"):
+                with self.subTest(filename=filename):
+                    self.main_window_module.MainWindow.open_project(window, filename)
+            self.assertEqual(warning.call_count, 9)
+            load.assert_not_called()
+        window.SpeedSignal.emit.assert_not_called()
+        window.PauseSignal.emit.assert_not_called()
+        window.videoPreview.clearTransformState.assert_not_called()
+        window.clearSelections.assert_not_called()
+        window.clear_temporary_files.assert_not_called()
 
     def test_open_project_missing_file_removes_recent_project_and_seeks_start(self):
         status_messages = []
@@ -920,6 +969,21 @@ class MainWindowTests(unittest.TestCase):
         self.assertTrue(fake_window.shutting_down)
 
     def test_open_project_success_loads_project_and_refreshes_ui(self):
+        self._check_open_project_success()
+
+    def test_open_project_accepts_uppercase_extension(self):
+        self._check_open_project_success("existing.OSP")
+
+    def test_open_project_accepts_repair_backup_names(self):
+        for filename in ("existing.osp.bak", "existing.osp.bak.1",
+                         "existing.osp.bak.999", "existing.OSP.BAK.2"):
+            with self.subTest(filename=filename):
+                self._check_open_project_success(filename)
+
+    def test_open_project_accepts_android_document_uri(self):
+        self._check_open_project_success("content://documents/document/123")
+
+    def _check_open_project_success(self, path=None):
         refresh_files = SignalRecorder()
         refresh_frame = SignalRecorder()
         max_size = SignalRecorder()
@@ -968,7 +1032,7 @@ class MainWindowTests(unittest.TestCase):
 
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
-                project_path = os.path.join(tmpdir, "existing.osp")
+                project_path = path or os.path.join(tmpdir, "existing.osp")
                 with ExitStack() as stack:
                     stack.enter_context(
                         patch.object(self.main_window_module.os.path, "exists", return_value=True)
@@ -1080,6 +1144,22 @@ class MainWindowTests(unittest.TestCase):
 
         self.assertEqual(calls, ["effect", ("clip", False), ("transition", False)])
         self.assertEqual(refreshed.calls, [()])
+        self.assertIsNone(self.app.updates.transaction_id)
+
+    def test_delete_item_does_not_remove_effect_after_keyframe_error(self):
+        def failed_delete():
+            raise RuntimeError("Keyframe update failed")
+
+        calls = []
+        self.app.updates = types.SimpleNamespace(transaction_id=None)
+        window = types.SimpleNamespace(
+            filesView=types.SimpleNamespace(hasFocus=lambda: False),
+            timeline=types.SimpleNamespace(delete_selected_keyframes=failed_delete),
+            actionRemoveEffect_trigger=lambda: calls.append("effect"),
+            actionRemoveClip_trigger=lambda **kwargs: calls.append("clip"),
+            actionRemoveTransition_trigger=lambda **kwargs: calls.append("transition"))
+        self.main_window_module.MainWindow.deleteItem(window)
+        self.assertEqual(calls, [])
         self.assertIsNone(self.app.updates.transaction_id)
 
     def test_add_and_show_docks_keep_default_dock_features(self):
@@ -1231,6 +1311,244 @@ class MainWindowTests(unittest.TestCase):
             self.assertFalse(settings.ENABLE_PLAYBACK_CACHING)
         finally:
             settings.ENABLE_PLAYBACK_CACHING = previous
+
+    def test_live_property_cache_restores_playback_state_after_drag(self):
+        view_type = self.properties_tableview_module.PropertiesTableView
+        settings = openshot.Settings.Instance()
+        original = settings.ENABLE_PLAYBACK_CACHING
+        try:
+            for initial in (True, False):
+                for playing_at_start, playing_at_end in ((True, True), (True, False), (False, False)):
+                    with self.subTest(initial=initial, start=playing_at_start, end=playing_at_end):
+                        settings.ENABLE_PLAYBACK_CACHING = initial
+                        playing = [playing_at_start]
+                        view = types.SimpleNamespace(
+                            live_property_cache_paused=False, _is_playing=lambda: playing[0])
+                        view_type.pause_live_property_caching(view)
+                        self.assertFalse(settings.ENABLE_PLAYBACK_CACHING)
+                        # Repeated mouse movements must not overwrite the original state.
+                        view_type.pause_live_property_caching(view)
+                        playing[0] = playing_at_end
+                        view_type.resume_live_property_caching(view)
+                        expected = initial if playing_at_start and playing_at_end else False
+                        self.assertEqual(settings.ENABLE_PLAYBACK_CACHING, expected)
+                        self.assertFalse(view.live_property_cache_paused)
+                        self.assertIsNone(view.live_property_playback_cache_state)
+                        view_type.resume_live_property_caching(view)
+                        self.assertEqual(settings.ENABLE_PLAYBACK_CACHING, expected)
+        finally:
+            settings.ENABLE_PLAYBACK_CACHING = original
+
+    def test_live_color_curve_records_nodes_and_handles_at_playhead(self):
+        from windows.color_grade_editor import CurvePreviewWidget
+
+        widget = CurvePreviewWidget()
+        widget.resize(300, 300)
+        self.addCleanup(widget.deleteLater)
+        model = self.properties_model_module.PropertiesModel.__new__(
+            self.properties_model_module.PropertiesModel)
+        model.selected = [(object(), "effect")]
+        model.selected_parent = types.SimpleNamespace(
+            Position=lambda: 1.0, Start=lambda: 2.0, End=lambda: 10.0)
+        model.frame_number = 1
+        model.update_model = MagicMock()
+        preview = types.SimpleNamespace(current_frame=49)
+        playing = [True]
+        view = types.SimpleNamespace(_is_playing=lambda: playing[0], clip_properties_model=model)
+        fake_app = types.SimpleNamespace(
+            project=types.SimpleNamespace(get=lambda key: {"num": 24, "den": 1}),
+            window=types.SimpleNamespace(preview_thread=preview))
+        widget.editFrameRequested.connect(
+            lambda: self.properties_tableview_module.PropertiesTableView._sync_curve_edit_frame(view, widget))
+        event = types.SimpleNamespace(position=lambda: QPointF(120, 150),
+                                      button=lambda: Qt.LeftButton, modifiers=lambda: Qt.NoModifier)
+        with patch.object(self.properties_tableview_module, "get_app", return_value=fake_app), \
+             patch.object(self.properties_model_module, "get_app", return_value=fake_app):
+            widget.mousePressEvent(event)
+            node_id = widget._drag_target["node_id"]
+            for frame, y in ((50, 130), (51, 110), (51, 100)):
+                preview.current_frame = frame
+                event.position = lambda y=y: QPointF(120, y)
+                widget.mouseMoveEvent(event)
+            node = widget._get_node(node_id)
+            for key in ("x", "y"):
+                frames = [int(p["co"]["X"]) for p in node[key]["Points"]]
+                self.assertTrue({73, 74, 75}.issubset(set(frames)))
+                self.assertEqual(frames.count(75), 1)
+            # Exercise the same live-time path for a Bezier handle.
+            widget._drag_target = {"type": "handle", "node_id": 0, "side": "right"}
+            for frame, x in ((52, 70), (53, 80)):
+                preview.current_frame = frame
+                event.position = lambda x=x: QPointF(x, 200)
+                widget.mouseMoveEvent(event)
+            playing[0] = False
+            widget.set_frame_number(90)
+            preview.current_frame = 60
+            widget.mouseMoveEvent(event)
+            for key in ("right_handle_x", "right_handle_y"):
+                frames = {int(p["co"]["X"]) for p in widget._get_node(0)[key]["Points"]}
+                self.assertTrue({76, 77, 90}.issubset(frames))
+        model.update_model.assert_not_called()
+
+    def test_live_color_wheel_records_advancing_clip_frames(self):
+        from windows.color_grade_editor import ColorGradeWheelsPanel
+
+        panel = ColorGradeWheelsPanel()
+        self.addCleanup(panel.deleteLater)
+        model = self.properties_model_module.PropertiesModel.__new__(
+            self.properties_model_module.PropertiesModel)
+        model.selected = [(object(), "effect")]
+        # A clip at timeline second 1, trimmed to source second 2.
+        model.selected_parent = types.SimpleNamespace(
+            Position=lambda: 1.0, Start=lambda: 2.0, End=lambda: 10.0)
+        model.frame_number = 1
+        model.update_model = MagicMock()
+        preview = types.SimpleNamespace(current_frame=49)
+        playing = [True]
+        view = types.SimpleNamespace(
+            _is_playing=lambda: playing[0], clip_properties_model=model,
+            color_grade_wheels_panel=panel)
+        fake_app = types.SimpleNamespace(
+            project=types.SimpleNamespace(get=lambda key: {"num": 24, "den": 1}),
+            window=types.SimpleNamespace(preview_thread=preview))
+        panel.editFrameRequested.connect(
+            lambda: self.properties_tableview_module.PropertiesTableView._sync_wheels_edit_frame(view))
+        emitted = []
+        panel.wheelsChanged.connect(emitted.append)
+        row = panel.rows["global"]
+        with patch.object(self.properties_tableview_module, "get_app", return_value=fake_app), \
+             patch.object(self.properties_model_module, "get_app", return_value=fake_app):
+            for frame, amount, color in ((49, 0.2, "#ff0000"), (50, 0.4, "#00ff00"),
+                                         (51, 0.6, "#0000ff"), (51, 0.8, "#0000ff")):
+                preview.current_frame = frame
+                row.wheel_control.set_wheel_data({"color": color, "amount": amount, "luma": 0.0})
+            preview.current_frame = 52
+            row._on_input_changed("luma", 0.3)
+            # Paused edits remain on the explicitly selected frame.
+            playing[0] = False
+            panel.set_frame_number(90, update_controls=False)
+            preview.current_frame = 60
+            row._on_input_changed("luma", 0.5)
+
+        points = emitted[-1]["global"]["amount_keyframes"]["Points"]
+        recorded = {int(p["co"]["X"]): p["co"]["Y"] for p in points}
+        self.assertEqual({f: recorded[f] for f in (73, 74, 75)}, {73: 0.2, 74: 0.4, 75: 0.8})
+        self.assertEqual(len([p for p in points if p["co"]["X"] == 75]), 1)
+        red = emitted[-1]["global"]["color_keyframes"]["red"]["Points"]
+        self.assertTrue({73, 74, 75}.issubset({int(p["co"]["X"]) for p in red}))
+        luma = {int(p["co"]["X"]): p["co"]["Y"]
+                for p in emitted[-1]["global"]["luma_keyframes"]["Points"]}
+        self.assertEqual(luma[76], 0.3)
+        self.assertEqual(luma[90], 0.5)
+        model.update_model.assert_not_called()
+
+    def test_numeric_property_drag_suspends_cache_through_final_save(self):
+        view_type = self.properties_tableview_module.PropertiesTableView
+        settings = openshot.Settings.Instance()
+        original = settings.ENABLE_PLAYBACK_CACHING
+        calls = []
+        recorded = []
+        preview = types.SimpleNamespace(current_frame=49)
+        playing = [True]
+        model = QStandardItemModel()
+        label, value = QStandardItem("Location X"), QStandardItem("0")
+        label.setData(("location_x", {"name": "Location X", "type": "float",
+                                     "min": -1.0, "max": 1.0, "readonly": False}))
+        model.appendRow([label, value])
+        viewport = types.SimpleNamespace(setCursor=lambda cursor: None,
+                                         unsetCursor=lambda: None, update=lambda: None)
+        view = types.SimpleNamespace(
+            live_property_cache_paused=False, _is_playing=lambda: playing[0],
+            mouse_pressed=True, lock_selection=False, previous_x=10, diff_length=0,
+            transaction_id=None, update_in_progress=False, selected_label=label,
+            selected_item=value, new_value=None, viewport=lambda: viewport,
+            indexAt=lambda pos: model.index(0, 1), columnViewportPosition=lambda col: 0,
+            columnWidth=lambda col: 100,
+            clip_properties_model=types.SimpleNamespace(
+                model=model, ignore_update_signal=False, frame_number=1,
+                selected=[(types.SimpleNamespace(Position=lambda: 1.0, Start=lambda: 2.0,
+                                                End=lambda: 10.0), "clip")],
+                update_model=MagicMock()))
+
+        def record_value(item, interpolation, value):
+            calls.append(("edit", settings.ENABLE_PLAYBACK_CACHING))
+            recorded.append((view.clip_properties_model.frame_number, value))
+
+        view.clip_properties_model.value_updated = record_value
+        view.clip_properties_model.update_frame = types.MethodType(
+            self.properties_model_module.PropertiesModel.update_frame, view.clip_properties_model)
+        view.pause_live_property_caching = lambda: view_type.pause_live_property_caching(view)
+        view.resume_live_property_caching = lambda: view_type.resume_live_property_caching(view)
+        view.start_transaction = lambda item: setattr(view, "transaction_id", "numeric-drag")
+        view.finalize_transaction = lambda: calls.append(("save", settings.ENABLE_PLAYBACK_CACHING))
+        event = types.SimpleNamespace(position=lambda: QPointF(50, 10), accept=lambda: None)
+        try:
+            settings.ENABLE_PLAYBACK_CACHING = True
+            with patch.object(self.properties_tableview_module, "get_app",
+                              return_value=types.SimpleNamespace(
+                                  updates=types.SimpleNamespace(ignore_history=False),
+                                  window=types.SimpleNamespace(preview_thread=preview))), \
+                 patch.object(self.properties_model_module, "get_app",
+                              return_value=types.SimpleNamespace(project=types.SimpleNamespace(
+                                  get=lambda key: {"num": 24, "den": 1}))):
+                for frame, x in ((49, 50), (50, 60), (51, 70), (51, 80)):
+                    preview.current_frame = frame
+                    event.position = lambda x=x: QPointF(x, 10)
+                    view_type.mouseMoveEvent(view, event)
+                    self.assertFalse(settings.ENABLE_PLAYBACK_CACHING)
+                view_type.mouseReleaseEvent(view, event)
+                # Paused dragging must use the explicitly selected property frame.
+                playing[0] = False
+                view.clip_properties_model.frame_number = 90
+                preview.current_frame = 60
+                view.mouse_pressed = True
+                view.previous_x = 10
+                view.diff_length = 0
+                view_type.mouseMoveEvent(view, event)
+                view_type.mouseReleaseEvent(view, event)
+            self.assertEqual([frame for frame, value in recorded], [73, 74, 75, 75, 90])
+            self.assertEqual(len(calls), 7)
+            self.assertTrue(all(cache is False for action, cache in calls))
+            view.clip_properties_model.update_model.assert_not_called()
+            self.assertFalse(settings.ENABLE_PLAYBACK_CACHING)
+        finally:
+            settings.ENABLE_PLAYBACK_CACHING = original
+
+    def test_color_wheel_drag_keeps_cache_suspended_through_final_save(self):
+        view_type = self.properties_tableview_module.PropertiesTableView
+        settings = openshot.Settings.Instance()
+        original = settings.ENABLE_PLAYBACK_CACHING
+        updates = types.SimpleNamespace(ignore_history=False)
+        calls = []
+        view = types.SimpleNamespace(
+            live_property_cache_paused=False, _is_playing=lambda: True,
+            live_property_session={"property_type": "colorgrade_wheels", "item": object()},
+            transaction_id=None)
+        view.pause_live_property_caching = lambda: view_type.pause_live_property_caching(view)
+        view.resume_live_property_caching = lambda: view_type.resume_live_property_caching(view)
+
+        def start(item):
+            calls.append(("start", settings.ENABLE_PLAYBACK_CACHING))
+            view.transaction_id = "wheel-drag"
+
+        def finish():
+            calls.append(("save", settings.ENABLE_PLAYBACK_CACHING))
+            view.transaction_id = None
+
+        view.start_transaction = start
+        view.finalize_transaction = finish
+        try:
+            settings.ENABLE_PLAYBACK_CACHING = True
+            with patch.object(self.properties_tableview_module, "get_app",
+                              return_value=types.SimpleNamespace(updates=updates)):
+                view_type._wheels_drag_started(view)
+                self.assertFalse(settings.ENABLE_PLAYBACK_CACHING)
+                view_type._wheels_drag_finished(view)
+            self.assertEqual(calls, [("start", False), ("save", False)])
+            self.assertTrue(settings.ENABLE_PLAYBACK_CACHING)
+            self.assertFalse(updates.ignore_history)
+        finally:
+            settings.ENABLE_PLAYBACK_CACHING = original
 
     def test_insert_keyframe_adds_current_color_property_frame(self):
         saved = []

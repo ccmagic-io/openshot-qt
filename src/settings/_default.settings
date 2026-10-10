@@ -73,6 +73,48 @@
     "setting": "unique_install_id"
   },
   {
+    "value": false,
+    "title": "",
+    "type": "hidden",
+    "category": "General",
+    "setting": "feedback-shown"
+  },
+  {
+    "value": 0,
+    "title": "",
+    "type": "hidden",
+    "category": "General",
+    "setting": "feedback-use-seconds"
+  },
+  {
+    "value": "",
+    "title": "",
+    "type": "hidden",
+    "category": "General",
+    "setting": "feedback-release"
+  },
+  {
+    "value": 0,
+    "title": "",
+    "type": "hidden",
+    "category": "General",
+    "setting": "feedback-action-count"
+  },
+  {
+    "value": [],
+    "title": "",
+    "type": "hidden",
+    "category": "General",
+    "setting": "feedback-action-categories"
+  },
+  {
+    "value": "",
+    "title": "",
+    "type": "hidden",
+    "category": "General",
+    "setting": "dismissed-update-version"
+  },
+  {
     "value": true,
     "title": "",
     "type": "hidden",
@@ -533,18 +575,16 @@
     "setting": "comfy-ui-url"
   },
   {
-    "min": 0,
-    "max": 9999,
-    "value": 5556,
-    "title": "Debug Mode (Port)",
-    "type": "spinner-int",
+    "value": false,
+    "title": "User Interface Debug Logging",
+    "type": "bool",
     "category": "Advanced",
-    "setting": "debug-port",
-    "restart": true
+    "setting": "debug-ui",
+    "restart": false
   },
   {
     "value": false,
-    "title": "Debug Mode (Verbose)",
+    "title": "Video & Audio Engine Debug Logging",
     "type": "bool",
     "category": "Advanced",
     "setting": "debug-mode",
@@ -734,6 +774,22 @@
     "restart": false,
     "setting": "actionAbout",
     "value": "Ctrl+H",
+    "type": "text"
+  },
+  {
+    "category": "Keyboard",
+    "title": "Update Available",
+    "restart": false,
+    "setting": "actionUpdate",
+    "value": "F9",
+    "type": "text"
+  },
+  {
+    "category": "Keyboard",
+    "title": "Share Feedback...",
+    "restart": false,
+    "setting": "actionShareFeedback",
+    "value": "F8",
     "type": "text"
   },
   {
@@ -1371,6 +1427,14 @@
 
 
 
+  {
+    "category": "Location",
+    "title": "Unsaved Project Assets Folder",
+    "setting": "unsaved-assets-path",
+    "value": "",
+    "type": "browse-folder",
+    "restart": true
+  },
   {
     "category": "Location",
     "title": "File Import",

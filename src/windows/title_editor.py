@@ -54,6 +54,7 @@ import openshot
 from classes import info, ui_util, tabstops
 from classes.logger import log
 from classes.app import get_app
+from classes.feedback import record_feedback_action
 from classes.metrics import track_metric_screen
 from windows.color_picker import ColorPicker, draw_checkerboard
 from classes.style_tools import style_to_dict, dict_to_style, set_if_existing
@@ -260,44 +261,48 @@ class TitleEditor(QDialog):
         self.update_timer.start()
 
     def display_svg(self):
-        # Create a temp file for the thumbnail image
-        new_file, tmp_filename = tempfile.mkstemp(suffix=".png")
-        os.close(new_file)
+        # Select the SVG reader explicitly so an unreadable title reports the
+        # original image error instead of leaving a Clip without a reader.
+        reader = openshot.QtImageReader(self.filename, False)
+        tmp_filename = None
+        try:
+            reader.Open()
 
-        # Create a clip object and get the reader
-        clip = openshot.Clip(self.filename)
-        reader = clip.Reader()
+            # Get the device pixel ratio (for high DPI)
+            scale = get_app().devicePixelRatio()
 
-        # Get the device pixel ratio (for high DPI)
-        scale = get_app().devicePixelRatio()
+            # Get the available size (logical) and the original title size
+            avail_size = self.lblPreviewLabel.rect().size()
+            orig_size = QSize(reader.info.width, reader.info.height)
 
-        # Get the available size (logical) and the original title size
-        avail_size = self.lblPreviewLabel.rect().size()
-        orig_size = QSize(reader.info.width, reader.info.height)
+            # Compute the target rectangle that preserves the title's aspect ratio
+            target_size = orig_size.scaled(avail_size, Qt.KeepAspectRatio)
+            target_rect = QRect(QPoint(0, 0), target_size)
+            target_rect.moveCenter(self.lblPreviewLabel.rect().center())
 
-        # Compute the target rectangle that preserves the title's aspect ratio
-        target_size = orig_size.scaled(avail_size, Qt.KeepAspectRatio)
-        target_rect = QRect(QPoint(0, 0), target_size)
-        target_rect.moveCenter(self.lblPreviewLabel.rect().center())
+            # Determine thumbnail dimensions in physical pixels
+            thumb_width = round(target_rect.width() * scale)
+            thumb_height = round(target_rect.height() * scale)
 
-        # Determine thumbnail dimensions in physical pixels
-        thumb_width = round(target_rect.width() * scale)
-        thumb_height = round(target_rect.height() * scale)
+            # Generate the thumbnail.
+            new_file, tmp_filename = tempfile.mkstemp(suffix=".png")
+            os.close(new_file)
+            reader.GetFrame(1).Thumbnail(
+                tmp_filename,
+                thumb_width,
+                thumb_height,
+                "", "", "#00000000", False, "png", 85, 0.0)
 
-        # Generate the thumbnail.
-        reader.Open()
-        reader.GetFrame(1).Thumbnail(
-            tmp_filename,
-            thumb_width,
-            thumb_height,
-            "", "", "#00000000", False, "png", 85, 0.0)
-        reader.Close()
-        clip.Close()
-
-        # Load the thumbnail pixmap and set its device pixel ratio
-        preview_pixmap = QIcon(tmp_filename).pixmap(thumb_width, thumb_height)
-        preview_pixmap.setDevicePixelRatio(scale)
-        os.unlink(tmp_filename)
+            preview_pixmap = QIcon(tmp_filename).pixmap(thumb_width, thumb_height)
+            preview_pixmap.setDevicePixelRatio(scale)
+        except RuntimeError as ex:
+            log.warning("Unable to preview SVG title %s: %s", self.filename, ex)
+            self.thumbnailReady.emit(QPixmap())
+            return
+        finally:
+            reader.Close()
+            if tmp_filename is not None:
+                os.unlink(tmp_filename)
 
         # Create the final pixmap filled with the label's background color
         final_pixmap = QPixmap(avail_size * scale)
@@ -316,10 +321,27 @@ class TitleEditor(QDialog):
 
     def create_temp_title(self, template_path):
         """Set temp file path & make copy of template"""
-        self.filename = os.path.join(info.USER_PATH, "title", "temp.svg")
+        if not getattr(self, "_temp_title", None):
+            os.makedirs(info.TITLE_PATH, exist_ok=True)
+            fd, self._temp_title = tempfile.mkstemp(prefix="openshot-", suffix=".svg", dir=info.TITLE_PATH)
+            os.close(fd)
+            self.finished.connect(self._remove_temp_title)
+        self.filename = self._temp_title
         # Copy template to temp file (NOT preserving attributes)
         shutil.copyfile(template_path, self.filename)
         return self.filename
+
+    def _remove_temp_title(self, result=None):
+        """Remove only this dialog's scratch SVG, never the accepted title."""
+        path = getattr(self, "_temp_title", None)
+        if path:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.warning("Unable to remove temporary title %s", path, exc_info=True)
+            self._temp_title = None
 
     def detect_font(self):
         """ Detect font from SVG: TEXT and TSPAN nodes (or use fallback font) """
@@ -574,6 +596,8 @@ class TitleEditor(QDialog):
             file.close()
         except IOError as inst:
             log.error("Error writing SVG title: {}".format(inst))
+            return False
+        return True
 
     def save_and_reload(self):
         """Something changed, so update temp SVG and redisplay"""
@@ -590,9 +614,11 @@ class TitleEditor(QDialog):
             return
 
         self.is_thread_busy = True
-        self.writeToFile(self.xmldoc)
-        self.display_svg()
-        self.is_thread_busy = False
+        try:
+            self.writeToFile(self.xmldoc)
+            self.display_svg()
+        finally:
+            self.is_thread_busy = False
 
     @pyqtSlot(QColor)
     def color_callback(self, save_fn, refresh_fn, color):
@@ -843,10 +869,12 @@ class TitleEditor(QDialog):
                 self.filename = file_path
 
                 # Save title
-                self.writeToFile(self.xmldoc)
+                title_saved = self.writeToFile(self.xmldoc)
 
                 # Add file to project
                 app.window.files_model.add_files(self.filename, prevent_image_seq=True, prevent_recent_folder=True)
+                if title_saved:
+                    record_feedback_action("titles")
 
         # Close window
         super().accept()

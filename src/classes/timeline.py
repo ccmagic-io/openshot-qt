@@ -128,6 +128,15 @@ class TimelineSync(UpdateInterface):
         except Exception as e:
             log.error("Error applying JSON to timeline object in libopenshot: %s. %s" %
                      (e, action.json(is_array=True)))
+        finally:
+            # Refresh borrowed clip/effect pointers before another update listener
+            # can process UI events, including between actions in an undo/redo.
+            if action.key and action.key[0] == "clips":
+                preview = getattr(self.window, "videoPreview", None)
+                if preview is not None:
+                    # ProjectDataStore has not applied this action yet. Reading
+                    # queries here would cache old data under the new version.
+                    preview.refreshTriggered(refresh_project=False)
 
         # Cache stays off — re-enabled when the user seeks or starts playback
 
@@ -156,13 +165,18 @@ class TimelineSync(UpdateInterface):
             )
             return
 
-        log.info(f"Adjusting max size of preview image: {scaled_width}x{scaled_height}")
-
         # Set new max video size (Based on preview widget size and display scaling)
         previous_preview_width = self.timeline.preview_width
         previous_preview_height = self.timeline.preview_height
 
         self.timeline.SetMaxSize(scaled_width, scaled_height)
+        log.info(
+            "Preview image size: %sx%s (requested bounds: %sx%s)",
+            self.timeline.preview_width,
+            self.timeline.preview_height,
+            scaled_width,
+            scaled_height,
+        )
 
         if (
             previous_preview_width != self.timeline.preview_width

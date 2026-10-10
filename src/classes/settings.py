@@ -63,10 +63,11 @@ class SettingStore(JsonDataStore):
         self.settings_filename = "openshot.settings"
         self.defaults_path = os.path.join(info.PATH, 'settings', '_default.settings')
 
-    def _apply_runtime_defaults(self, settings_list):
-        """Overlay runtime-detected libopenshot defaults onto selected settings."""
+    def _apply_runtime_defaults(self, settings_list, initialize_assets=True):
+        """Overlay platform and runtime-detected defaults onto selected settings."""
         lib_settings = openshot.Settings.Instance()
         runtime_defaults = {
+            "unsaved-assets-path": info.default_assets_path() if initialize_assets else "",
             "omp_threads_number": lib_settings.DefaultOMPThreads(),
             "ff_threads_number": lib_settings.DefaultFFThreads(),
         }
@@ -127,7 +128,8 @@ class SettingStore(JsonDataStore):
 
         # try to load default settings, on failure will raise exception to caller
         default_settings = self._apply_runtime_defaults(
-            self.read_from_file(self.defaults_path)
+            self.read_from_file(self.defaults_path),
+            initialize_assets=not self.has_user_value("unsaved-assets-path"),
         )
         self._data = default_settings
 
@@ -168,6 +170,9 @@ class SettingStore(JsonDataStore):
         log.info(f"Restoring defaults for category: {category_filter or 'all categories'}")
         preserve_keys = [
             'unique_install_id', 'tutorial_ids', 'tutorial_enabled', 'send_metrics',
+            'feedback-shown', 'feedback-use-seconds', 'feedback-release',
+            'feedback-action-count', 'feedback-action-categories',
+            'dismissed-update-version',
             'recent_projects', 'custom_views', 'active_custom_view', 'active_builtin_view',
         ]
 

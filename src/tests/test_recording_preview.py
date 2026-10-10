@@ -66,10 +66,100 @@ class RecordingPreviewTests(unittest.TestCase):
         cls.recording_widgets_module = recording_widgets_module
         cls.timeline_module = timeline_module
 
-    @classmethod
-    def tearDownClass(cls):
-        if getattr(cls, "_owns_app", False) and cls.app:
-            cls.app.quit()
+    def test_native_camera_modes_choose_mjpeg_and_preserve_fractional_rates(self):
+        helper = self.audio_recording_module
+        dock = types.SimpleNamespace()
+        def mode(fmt, num, den=1):
+            return types.SimpleNamespace(width=1920, height=1080, input_format=fmt,
+                                         fps=types.SimpleNamespace(num=num, den=den))
+        native = [mode("yuyv422", 5), mode("mjpeg", 30), mode("h264", 30),
+                  mode("mjpeg", 30000, 1001), mode("mjpeg", 15, 2)]
+        with patch.object(helper, "camera_capture_backend_is_windows", return_value=False), \
+                patch.object(helper, "camera_capture_backend_is_mac", return_value=False), \
+                patch.object(helper.openshot.CameraCaptureReader, "GetDeviceModes", return_value=native) as query:
+            modes = helper.AudioRecordingDockContent._probe_camera_modes(dock, "/dev/video0")
+        query.assert_called_once()
+        self.assertEqual(modes[(1920, 1080)], {5, 30, 30000 / 1001, 7.5})
+        self.assertEqual(dock._camera_mode_formats[(1920, 1080, 30)], "mjpeg")
+        self.assertEqual(dock._camera_mode_formats[(1920, 1080, 5)], "yuyv422")
+        self.assertEqual(dock._camera_mode_rates[30000 / 1001], (30000, 1001))
+        self.assertEqual(dock._camera_mode_rates[7.5], (15, 2))
+
+    def test_native_camera_probe_failure_does_not_advertise_assumed_modes(self):
+        helper = self.audio_recording_module
+        for result in ([], RuntimeError("device disconnected")):
+            dock = types.SimpleNamespace(_camera_mode_formats={"stale": "mjpeg"})
+            with patch.object(helper, "camera_capture_backend_is_windows", return_value=False), \
+                    patch.object(helper, "camera_capture_backend_is_mac", return_value=False), \
+                    patch.object(helper.openshot.CameraCaptureReader, "GetDeviceModes",
+                                 **({"side_effect": result} if isinstance(result, Exception) else {"return_value": result})):
+                self.assertEqual(helper.AudioRecordingDockContent._probe_camera_modes(dock, "/dev/video0"), {})
+                self.assertEqual(dock._camera_mode_formats, {})
+
+    def test_camera_probe_keeps_windows_and_mac_defaults(self):
+        helper = self.audio_recording_module
+        for windows, mac in ((True, False), (False, True)):
+            dock = types.SimpleNamespace()
+            with patch.object(helper, "camera_capture_backend_is_windows", return_value=windows), \
+                    patch.object(helper, "camera_capture_backend_is_mac", return_value=mac), \
+                    patch.object(helper.openshot.CameraCaptureReader, "GetDeviceModes") as query:
+                modes = helper.AudioRecordingDockContent._probe_camera_modes(dock, "camera")
+            query.assert_not_called()
+            self.assertEqual(modes[(1920, 1080)], {30})
+            self.assertEqual(dock._camera_mode_formats, {})
+
+    def test_webcam_job_passes_native_format_and_rate_to_reader(self):
+        helper = self.audio_recording_module
+        for windows, mac, selected, expected_rate in (
+                (False, False, 30000 / 1001, (30000, 1001)),
+                (False, False, 7.5, (15, 2)),
+                (True, False, 30, (30, 1)),
+                (False, True, 30, (30, 1))):
+            dock = types.SimpleNamespace(
+                video_fps_combo=types.SimpleNamespace(currentData=lambda: 30),
+                screen_card=types.SimpleNamespace(isChecked=lambda: False),
+                camera_card=types.SimpleNamespace(isChecked=lambda: True),
+                camera_fps_combo=types.SimpleNamespace(currentData=lambda: selected),
+                camera_size_combo=types.SimpleNamespace(currentData=lambda: (1920, 1080)),
+                _selected_camera_device=lambda: "camera",
+                _safe_even_dimension=lambda value: value,
+                _camera_mode_rates={selected: expected_rate},
+                _camera_mode_formats={(1920, 1080, selected): "mjpeg"},
+                _next_named_recording_path=lambda *args: "unused.mp4",
+                _recording_preview_file_ids={},
+                _update_webcam_preview=MagicMock(),
+            )
+            reader_class = MagicMock()
+            with patch.object(helper, "camera_capture_backend_is_windows", return_value=windows), \
+                    patch.object(helper, "camera_capture_backend_is_mac", return_value=mac), \
+                    patch.object(helper.openshot, "CameraCaptureReader", reader_class), \
+                    patch.object(helper, "camera_capture_backend", return_value=helper.openshot.CAMERA_CAPTURE_V4L2), \
+                    patch.object(helper, "LiveVideoRecordingJob") as job:
+                helper.AudioRecordingDockContent._build_video_jobs(dock)
+            settings = reader_class.call_args[0][0]
+            self.assertEqual((settings.fps.num, settings.fps.den), expected_rate)
+            self.assertEqual((settings.width, settings.height), (1920, 1080))
+            if windows or mac:
+                self.assertEqual(dict(settings.options), {"use_device_defaults": "1"})
+            else:
+                self.assertEqual(dict(settings.options), {"input_format": "mjpeg"})
+            job.assert_called_once()
+
+    def test_webcam_job_rejects_unprobed_linux_mode(self):
+        helper = self.audio_recording_module
+        dock = types.SimpleNamespace(
+            video_fps_combo=types.SimpleNamespace(currentData=lambda: 30),
+            screen_card=types.SimpleNamespace(isChecked=lambda: False),
+            camera_card=types.SimpleNamespace(isChecked=lambda: True),
+            camera_fps_combo=types.SimpleNamespace(currentData=lambda: None),
+        )
+        with patch.object(helper, "camera_capture_backend_is_windows", return_value=False), \
+                patch.object(helper, "camera_capture_backend_is_mac", return_value=False), \
+                patch.object(helper, "get_app", return_value=self.app), \
+                patch.object(helper.openshot, "CameraCaptureReader") as reader:
+            with self.assertRaisesRegex(RuntimeError, "supported webcam"):
+                helper.AudioRecordingDockContent._build_video_jobs(dock)
+            reader.assert_not_called()
 
     def test_recording_preview_file_id_sanitizes_source(self):
         helper = self.audio_recording_module
@@ -222,7 +312,7 @@ class RecordingPreviewTests(unittest.TestCase):
         dock._camera_devices_refreshed = True
         helper.AudioRecordingDockContent._sync_source_availability(dock)
 
-        available, tooltip = dock.camera_card.setAvailable.call_args.args
+        available, tooltip = dock.camera_card.setAvailable.call_args[0]
         self.assertFalse(available)
         self.assertIn("No webcam", tooltip)
 
@@ -1587,6 +1677,37 @@ class RecordingPreviewTests(unittest.TestCase):
         self.assertTrue(screen_data["reader"]["has_video"])
         self.assertEqual(screen_data["reader"]["width"], 1920)
         self.assertEqual(screen_data["reader"]["video_length"], 90)
+
+        # Previews must remain visible, but cannot be selected, dragged,
+        # duplicated, cut, or used as targets for effects and context menus.
+        # All those interactions consume the default geometry iterators.
+        from windows.views.timeline_backend.geometry import Geometry
+        from windows.views.timeline_backend.geometry import clip as geometry_clip
+        from classes.query import Clip
+        widget = types.SimpleNamespace(
+            _recording_preview_clips=helper._recording_preview_clips,
+            track_name_width=100, pixels_per_second=10,
+            ruler_height=20, vertical_factor=50,
+            normalize_track_number=lambda layer: layer,
+        )
+        geometry = Geometry(widget)
+        geometry._current_view_state = lambda: dict(
+            h_offset=0, v_offset=0, view_w=800, view_h=500)
+        saved = Clip()
+        saved.id = "saved"
+        saved.data = dict(position=0, start=0, end=5, layer=2)
+        with patch.object(geometry_clip.Clip, "filter", return_value=[saved]):
+            geometry._populate_clip_rects(
+                {2: 0, 3: 1}, {"spacing": 60},
+                types.SimpleNamespace(selected_clips=["saved", "preview-mic"]),
+            )
+        self.assertEqual([clip.id for _, clip, _ in geometry.iter_clips()], ["saved"])
+        self.assertEqual([clip.id for _, clip, _, _ in geometry.iter_items()], ["saved"])
+        painted = list(geometry.iter_clips(include_previews=True))
+        self.assertEqual({clip.id for _, clip, _ in painted},
+                         {"saved", "preview-mic", "preview-screen"})
+        self.assertTrue(next(selected for _, clip, selected in painted if clip.id == "saved"))
+        self.assertFalse(any(selected for _, clip, selected in painted if clip.id != "saved"))
 
 
 if __name__ == "__main__":

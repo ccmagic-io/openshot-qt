@@ -42,6 +42,28 @@ from ..colors import effect_color_qcolor
 from windows.views.menu import StyledContextMenu, populate_keyframe_context_menu
 
 
+def keyframe_hit_at(pos, candidates):
+    """Prefer icon hits, then the nearest icon within three logical pixels.
+
+    Candidates are (rect, marker) pairs in their normal hit-test order.
+    Keep hover, click, and drag targets identical without enlarging the artwork.
+    """
+    nearest = None
+    nearest_distance = float("inf")
+    for rect, marker in candidates:
+        if not isinstance(rect, QRectF) or rect.isNull():
+            continue
+        if rect.contains(pos):
+            return marker
+        if rect.adjusted(-3, -3, 3, 3).contains(pos):
+            delta = rect.center() - pos
+            distance = delta.x() ** 2 + delta.y() ** 2
+            if distance < nearest_distance:
+                nearest = marker
+                nearest_distance = distance
+    return nearest
+
+
 class KeyframeMixin:
     def _keyframe_item_position(self, item):
         """Return the item's timeline position, honoring live preview overrides."""
@@ -918,11 +940,10 @@ class KeyframeMixin:
 
     def _get_keyframe_at(self, pos):
         self._ensure_keyframe_markers()
-        for marker in reversed(self._keyframe_markers):
-            rect = marker.get("rect")
-            if isinstance(rect, QRectF) and rect.contains(pos):
-                return marker
-        return None
+        return keyframe_hit_at(
+            pos,
+            ((marker.get("rect"), marker) for marker in reversed(self._keyframe_markers)),
+        )
 
     def _clamp_keyframe_seconds(self, seconds, clip_start, clip_end):
         max_sec = clip_end
@@ -1374,6 +1395,11 @@ class KeyframeMixin:
             return effect_label
         return "clip %s" % clip_id if clip_id else "clip"
 
+    @staticmethod
+    def _panel_point_paths(point):
+        """Resolve ordinary points and grouped color-grade icons alike."""
+        return tuple(point.get("paths") or (() if not point.get("path") else (point["path"],)))
+
     def _panel_selected_keyframe_targets(self):
         targets = {}
         panel_selection = getattr(self, "_panel_selected_keyframes", {}) or {}
@@ -1402,8 +1428,8 @@ class KeyframeMixin:
                         fallback_context=prop_context,
                     ):
                         continue
-                    path = point.get("path")
-                    if not path:
+                    paths = self._panel_point_paths(point)
+                    if not paths:
                         continue
                     owner = self._panel_resolve_owner(prop, prop_context, point=point)
                     owner_type = owner.get("owner_type") or "clip"
@@ -1430,7 +1456,7 @@ class KeyframeMixin:
                         }
                         targets[key] = target
                     try:
-                        target["paths"].add(tuple(path))
+                        target["paths"].update(tuple(path) for path in paths)
                     except TypeError:
                         continue
         return list(targets.values())
@@ -1556,6 +1582,12 @@ class KeyframeMixin:
         if not timeline:
             return False
 
+        panel_selected = any(
+            selector for selection in getattr(self, "_panel_selected_keyframes", {}).values()
+            for selector in selection.values())
+        marker_selected = bool(getattr(self, "_active_keyframe_marker", None)
+                               or getattr(self, "_press_keyframe", None)
+                               or getattr(self, "_dragging_keyframe", None))
         changed = False
         targets = self._panel_selected_keyframe_targets()
         for target in targets:
@@ -1574,7 +1606,6 @@ class KeyframeMixin:
                 deleted_count = self._count_keyframes_by_paths(data_copy, paths)
                 if not self._remove_keyframes_by_paths(data_copy, paths):
                     continue
-                self._remove_keyframes_by_paths(transition.data, paths)
                 timeline.update_transition_data(
                     data_copy,
                     only_basic_props=False,
@@ -1595,7 +1626,6 @@ class KeyframeMixin:
             deleted_count = self._count_keyframes_by_paths(data_copy, paths)
             if not self._remove_keyframes_by_paths(data_copy, paths):
                 continue
-            self._remove_keyframes_by_paths(clip.data, paths)
             timeline.update_clip_data(
                 data_copy,
                 only_basic_props=False,
@@ -1609,7 +1639,7 @@ class KeyframeMixin:
             )
             changed = True
 
-        if not changed:
+        if not changed and not panel_selected:
             marker = getattr(self, "_active_keyframe_marker", None)
             if not marker:
                 marker = getattr(self, "_press_keyframe", None)
@@ -1618,7 +1648,9 @@ class KeyframeMixin:
             changed = self._delete_keyframe_marker_target(marker)
 
         if not changed:
-            return False
+            # A selected keyframe consumes Delete even if no point is removable.
+            # Never fall through to deleting its effect or clip.
+            return panel_selected or marker_selected
 
         self._active_keyframe_marker = None
         self._press_keyframe = None
@@ -1773,7 +1805,6 @@ class KeyframeMixin:
                     continue
                 data_copy = json.loads(json.dumps(trans.data))
                 if self._remove_keyframes_by_paths(data_copy, paths):
-                    self._remove_keyframes_by_paths(trans.data, paths)
                     timeline.update_transition_data(data_copy, only_basic_props=False, ignore_refresh=False)
                     changed = True
             else:
@@ -1782,7 +1813,6 @@ class KeyframeMixin:
                     continue
                 data_copy = json.loads(json.dumps(clip.data))
                 if self._remove_keyframes_by_paths(data_copy, paths):
-                    self._remove_keyframes_by_paths(clip.data, paths)
                     timeline.update_clip_data(data_copy, only_basic_props=False, ignore_reader=True, ignore_refresh=False)
                     changed = True
 
@@ -1819,8 +1849,8 @@ class KeyframeMixin:
             panel_targets = self._panel_selected_keyframe_targets()
             if not panel_targets:
                 point = panel_info.get("point") or {}
-                path = point.get("path") if isinstance(point, dict) else None
-                if path:
+                paths = self._panel_point_paths(point)
+                if paths:
                     prop = panel_info.get("property") or {}
                     track_ctx = panel_info.get("context")
                     prop_ctx = self._panel_property_context(prop, track_ctx)
@@ -1833,7 +1863,7 @@ class KeyframeMixin:
                             "object_id": oid,
                             "clip": owner.get("clip"),
                             "transition": owner.get("transition"),
-                            "paths": {tuple(path)},
+                            "paths": {tuple(path) for path in paths},
                         }]
 
         if not marker and not panel_targets:

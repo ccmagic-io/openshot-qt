@@ -44,8 +44,8 @@ from xml.parsers.expat import ExpatError
 
 from qt_api import Qt, QCoreApplication, QTimer, QSize, QPoint, pyqtSignal, pyqtSlot
 from qt_api import (
-    QMessageBox, QDialog, QFileDialog, QDialogButtonBox, QPushButton, QWidget, QLineEdit, QComboBox, QSpinBox, QCheckBox,
-    location_file_dialog_options,
+    QMessageBox, QDialog, QDialogButtonBox, QPushButton, QWidget, QLineEdit, QComboBox, QSpinBox, QCheckBox,
+    get_existing_directory,
 )
 from qt_api import QIcon
 from functools import partial
@@ -54,6 +54,7 @@ from classes import ui_util
 from classes import openshot_rc  # noqa
 from classes.logger import log
 from classes.app import get_app
+from classes.feedback import record_feedback_action
 from classes.metrics import track_metric_screen, track_metric_error
 from classes.query import File
 
@@ -450,7 +451,10 @@ class Export(QDialog):
         self.timeline.info.fps.den = self.txtFrameRateDen.value()
         self.timeline.info.sample_rate = self.txtSampleRate.value()
         self.timeline.info.channels = self.txtChannels.value()
-        self.timeline.info.channel_layout = self.cboChannelLayout.currentData()
+        channel_layout = self.cboChannelLayout.currentData()
+        # Clearing/repopulating the combo emits changes without a selection.
+        if channel_layout is not None:
+            self.timeline.info.channel_layout = channel_layout
 
         # Disable audio (if not needed)
         if self.timeline.info.sample_rate == 0 or self.timeline.info.channels == 0:
@@ -561,6 +565,9 @@ class Export(QDialog):
 
     def cboProfile_index_changed(self, widget, index):
         selected_profile_path = widget.itemData(index)
+        # Clearing/repopulating the combo can emit a selection without a profile.
+        if not selected_profile_path:
+            return
         log.info(selected_profile_path)
 
         # get translations
@@ -818,13 +825,7 @@ class Export(QDialog):
         default_path = self.s.getDefaultPath(self.s.actionType.EXPORT)
 
         # update export folder path
-        options = location_file_dialog_options()
-        if options is None:
-            file_path = QFileDialog.getExistingDirectory(
-                self, _("Choose a Folder..."), default_path)
-        else:
-            file_path = QFileDialog.getExistingDirectory(
-                self, _("Choose a Folder..."), default_path, options=options)
+        file_path = get_existing_directory(self, _("Choose a Folder..."), default_path)
 
         # Don't change path if chosen path isn't valid
         if os.path.exists(file_path):
@@ -1312,6 +1313,8 @@ class Export(QDialog):
 
             # Close writer
             w.Close()
+            if self.exporting and max_frame == end_frame_export:
+                record_feedback_action("export")
 
             # Emit final exported frame (with elapsed time)
             seconds_run = round((end_time_export - start_time_export))

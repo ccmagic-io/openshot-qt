@@ -44,6 +44,7 @@ from qt_api import QDialog
 
 from classes import info, updates
 from classes.app import get_app
+from classes.feedback import feedback_command, record_feedback_action
 from classes.color_presets import (
     COLOR_GRADE_CLASS_NAME,
     COLOR_PRESET_AUTO_CONTRAST,
@@ -170,7 +171,7 @@ from .timeline_backend.enums import (
 )
 from .timeline_backend.qwidget import TimelineWidget
 from .timeline_backend.colors import effect_color_hex
-from .menu import StyledContextMenu
+from .menu import StyledContextMenu, add_bound_action
 from classes.clip_utils import (
     clamp_timing_to_media,
     apply_file_caption_to_clip,
@@ -749,9 +750,8 @@ class TimelineView(updates.UpdateInterface, ViewClass):
                     self._apply_pending_trim_refresh()
 
         try:
-            # Duplicate UpdateAction, and remove unused action attribute (old_values)
-            action = action.copy()
-            action.old_values = {}
+            # Copy the new state without serializing history we immediately discard.
+            action = action.copy(include_old_values=False)
         except:
             log.error("Error duplicating UpdateAction", exc_info=1)
             return
@@ -872,7 +872,12 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
         # Search for matching clip in project data (if any)
         existing_clip = Clip.get(id=clip_data.get("id"))
-        if not existing_clip:
+        is_new_clip = existing_clip is None
+        if is_new_clip:
+            # Delayed edits can arrive after a clip has been deleted. A partial
+            # update cannot recreate its reader or other media properties.
+            if not clip_data.get("reader"):
+                return
             # Create a new clip (if not exists)
             log.debug("Create new clip object from clip_data: %s" % clip_data)
             existing_clip = Clip()
@@ -884,7 +889,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         existing_clip.data = clip_data
 
         # Remove unneeded properties (since they don't change here... this is a performance boost)
-        if only_basic_props:
+        if only_basic_props and not is_new_clip:
             existing_clip.data = {}
             existing_clip.data["id"] = clip_data["id"]
             existing_clip.data["layer"] = clip_data["layer"]
@@ -899,7 +904,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
         # Always remove the Reader attribute (since nothing updates it,
         # and we are wrapping clips in FrameMappers anyway)
-        if ignore_reader and "reader" in existing_clip.data:
+        if ignore_reader and not is_new_clip and "reader" in existing_clip.data:
             existing_clip.data.pop("reader")
 
         # Set transaction id (if any)
@@ -1434,6 +1439,12 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         log.debug('ShowEffectMenu: %s' % effect_id)
         self._context_menu_paste_data = None
 
+        effect = Effect.get(id=effect_id)
+        if not effect:
+            return
+        track = Track.get(number=effect.parent.get("layer"))
+        locked = bool(track and track.data.get("lock", False))
+
         # Get translation method
         _ = get_app()._tr
 
@@ -1451,7 +1462,10 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
         # Remove Effect Menu
         menu.addSeparator()
-        menu.addAction(self.window.actionRemoveEffect)
+        add_bound_action(
+            menu, self.window, "actionRemoveEffect", _("Remove Effect"),
+            enabled=not locked and self.window.actionRemoveEffect.isEnabled(),
+        )
 
         # Show context menu
         self.context_menu_cursor_position = QCursor.pos()
@@ -1565,6 +1579,9 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             # Not a valid clip id
             return
 
+        track = Track.get(number=clip.data.get("layer"))
+        locked = bool(track and track.data.get("lock", False))
+
         # Get list of selected clips
         clip_ids = self.window.selected_clips
         tran_ids = self.window.selected_transitions
@@ -1579,7 +1596,11 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         clip_has_audio = bool(_reader.get("has_audio", True))
 
         # Get playhead position
-        playhead_position = float(self.window.preview_thread.current_frame - 1) / fps_float
+        current_frame = self.window.preview_thread.current_frame
+        if current_frame is None:
+            # The preview clears its frame during seeks; keep the displayed playhead.
+            current_frame = getattr(self, "current_frame", 1) or 1
+        playhead_position = float(current_frame - 1) / fps_float
 
         # Get clipboard
         copied_object = ClipboardManager.from_mime(get_app().clipboard().mimeData())
@@ -1596,6 +1617,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         if len(tran_ids) + len(clip_ids) > 1:
             # Show Copy All menu (clips and transitions are selected)
             Copy_All = menu.addAction(_("Copy"))
+            copy_action = Copy_All
             Copy_All.setShortcuts(self.window.getShortcutByName("copyAll"))
             Copy_All.triggered.connect(self.window.copyAll)
             # Show Cut All menu
@@ -1641,7 +1663,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             Copy_Effects.triggered.connect(partial(
                 self.Copy_Triggered, MenuCopy.ALL_EFFECTS, [clip_id], [], []))
             Copy_Menu.addMenu(Keyframe_Menu)
-            menu.addMenu(Copy_Menu)
+            copy_action = menu.addMenu(Copy_Menu)
 
             # Show Cut menu
             Cut_All = menu.addAction(_("Cut"))
@@ -2231,13 +2253,24 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
                 menu.addMenu(Slice_Menu)
 
+        # Keep Copy and Properties available on locked tracks. Disabling the
+        # editing submenus also prevents activating their nested actions.
+        if locked:
+            for action in menu.actions():
+                if action != copy_action and not action.isSeparator():
+                    action.setEnabled(False)
+
         # Properties
         menu.addSeparator()
         menu.addAction(self.window.actionProperties)
 
-        # Remove Clip Menu
+        # Use a menu-owned action so this lock state cannot disable the shared
+        # Remove Clip action in other menus or shortcuts.
         menu.addSeparator()
-        menu.addAction(self.window.actionRemoveClip)
+        add_bound_action(
+            menu, self.window, "actionRemoveClip", _("Remove Clip"),
+            enabled=not locked and self.window.actionRemoveClip.isEnabled(),
+        )
 
         # Show context menu
         self.context_menu_cursor_position = QCursor.pos()
@@ -2733,6 +2766,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         elif property_name in effect_json:
             effect_json[property_name] = value
 
+    @feedback_command("adjustments")
     def _apply_effect_preset(self, class_name, preset_name, clip_ids):
         """Apply a simple Look effect preset, or remove the effect for the none preset."""
         presets = LOOK_EFFECT_PRESETS.get(class_name, {})
@@ -2792,6 +2826,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
             get_app().updates.apply_last_action_to_history(original_clip_data)
 
+    @feedback_command("adjustments")
     def Reset_Look_Triggered(self, clip_ids):
         """Remove all effects managed by the clip Look menu."""
         for clip_id in clip_ids:
@@ -2836,6 +2871,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         effects.append(effect_json)
         return effect_json, True
 
+    @feedback_command("adjustments")
     def Color_Triggered(self, preset_name, clip_ids):
         """Apply or reset Color Grade presets for selected clips."""
         for clip_id in clip_ids:
@@ -2885,6 +2921,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
             get_app().updates.apply_last_action_to_history(original_clip_data)
 
+    @feedback_command("adjustments")
     def Film_Grain_Triggered(self, preset_name, clip_ids):
         """Apply Film Grain presets for selected clips."""
         for clip_id in clip_ids:
@@ -3037,6 +3074,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             # Save changes
             self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
 
+    @feedback_command("adjustments")
     def Animate_Triggered(self, action, clip_ids, transaction_id=None):
         """Apply one-click motion presets to selected clips.
 
@@ -3929,6 +3967,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             # Save changes
             self.update_transition_data(tran.data, only_basic_props=False)
 
+    @feedback_command("adjustments")
     def Fade_Triggered(self, action, clip_ids, position="Entire Clip", transaction_id=None):
         """Callback for fade context menus — fades both alpha (video) and volume (audio)"""
         log.debug(action)
@@ -4084,23 +4123,25 @@ class TimelineView(updates.UpdateInterface, ViewClass):
                 get_app().updates.transaction_id = None
 
     @pyqtSlot(str, str, float)
-    def RazorSliceAtCursor(self, clip_id, trans_id, cursor_position):
-        """Callback from javascript that the razor tool was clicked"""
+    def RazorSliceAtCursor(self, clip_id, trans_id, cursor_position, modifiers=None):
+        """Cut using the previewed modifiers, or keyboard state for legacy callers."""
+        if modifiers is None:
+            modifiers = QCoreApplication.instance().keyboardModifiers()
 
         # Determine slice mode (keep both [default], keep left [shift], keep right [ctrl]
         slice_mode = MenuSlice.KEEP_BOTH
-        if modifiers_has(QCoreApplication.instance().keyboardModifiers(), Qt.ControlModifier):
+        if modifiers_has(modifiers, Qt.ControlModifier):
             slice_mode = MenuSlice.KEEP_RIGHT
-        elif modifiers_has(QCoreApplication.instance().keyboardModifiers(), Qt.ShiftModifier):
+        elif modifiers_has(modifiers, Qt.ShiftModifier):
             slice_mode = MenuSlice.KEEP_LEFT
 
+        ripple = slice_mode != MenuSlice.KEEP_BOTH and modifiers_has(modifiers, Qt.AltModifier)
         if clip_id:
-            # Slice clip
-            QTimer.singleShot(0, partial(self.Slice_Triggered, slice_mode, [clip_id], [], cursor_position))
+            QTimer.singleShot(0, partial(self.Slice_Triggered, slice_mode, [clip_id], [], cursor_position, ripple))
         elif trans_id:
-            # Slice transitions
-            QTimer.singleShot(0, partial(self.Slice_Triggered, slice_mode, [], [trans_id], cursor_position))
+            QTimer.singleShot(0, partial(self.Slice_Triggered, slice_mode, [], [trans_id], cursor_position, ripple))
 
+    @feedback_command("structure")
     def Slice_Triggered(self, action, clip_ids, trans_ids, playhead_position=0, ripple=False):
         """Callback for slice context menus"""
         # Get FPS from project
@@ -4293,6 +4334,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             trans.data["position"] -= ripple_gap
             trans.save()
 
+    @feedback_command("adjustments")
     def Volume_Triggered(self, action, clip_ids, position="Entire Clip", level=1.0, transaction_id=None):
         """Callback for volume context menus"""
         log.debug(action)
@@ -4809,6 +4851,9 @@ class TimelineView(updates.UpdateInterface, ViewClass):
             # Not a valid transition id
             return
 
+        track = Track.get(number=tran.data.get("layer"))
+        locked = bool(track and track.data.get("lock", False))
+
         # Get list of all selected transitions
         tran_ids = self.window.selected_transitions
         clip_ids = self.window.selected_clips
@@ -4832,6 +4877,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         if len(tran_ids) + len(clip_ids) > 1:
             # Show Copy All menu (clips and transitions are selected)
             Copy_All = menu.addAction(_("Copy"))
+            copy_action = Copy_All
             Copy_All.setShortcuts(self.window.getShortcutByName("copyAll"))
             Copy_All.triggered.connect(self.window.copyAll)
             # Show Cut All menu
@@ -4859,7 +4905,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
             # Only show copy->keyframe if a single transitions is selected
             Copy_Menu.addMenu(Keyframe_Menu)
-            menu.addMenu(Copy_Menu)
+            copy_action = menu.addMenu(Copy_Menu)
 
         # Show Cut menu
         Cut_All = menu.addAction(_("Cut"))
@@ -4919,13 +4965,22 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         Reverse_Transition = menu.addAction(_("Reverse Transition"))
         Reverse_Transition.triggered.connect(partial(self.Reverse_Transition_Triggered, tran_ids))
 
+        # Match the clip menu: keep Copy and Properties available while locked.
+        if locked:
+            for action in menu.actions():
+                if action != copy_action and not action.isSeparator():
+                    action.setEnabled(False)
+
         # Properties
         menu.addSeparator()
         menu.addAction(self.window.actionProperties)
 
         # Remove transition menu
         menu.addSeparator()
-        menu.addAction(self.window.actionRemoveTransition)
+        add_bound_action(
+            menu, self.window, "actionRemoveTransition", _("Remove Transition"),
+            enabled=not locked and self.window.actionRemoveTransition.isEnabled(),
+        )
 
         # Show context menu
         self.context_menu_cursor_position = QCursor.pos()
@@ -5127,9 +5182,8 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         self.window.LoadTimelineAndSeekSignal.emit(target_frame)
         QTimer.singleShot(0, lambda: setattr(self.window, "_trim_refresh_pending", False))
 
-    @pyqtSlot(str, int)
-    def PreviewClipFrame(self, clip_id, frame_number):
-
+    def _clip_preview_source(self, clip_id, frame_number):
+        """Resolve the same source path and time mapping for trim and razor previews."""
         # Get existing clip object
         clip = Clip.get(id=clip_id)
         if not clip:
@@ -5174,14 +5228,40 @@ class TimelineView(updates.UpdateInterface, ViewClass):
                 except Exception as exc:
                     log.debug("Failed to map time curve for clip %s: %s", clip_id, exc, exc_info=True)
 
-        frame_number = max(mapped_frame, 1)
+        return preview_path, max(mapped_frame, 1)
+
+    @pyqtSlot(str, int)
+    def PreviewClipFrame(self, clip_id, frame_number):
+        source = self._clip_preview_source(clip_id, frame_number)
+        if not source:
+            return
+        preview_path, frame_number = source
 
         # Load the clip into the Player (ignored if this has already happened)
         self.window.LoadFileSignal.emit(preview_path)
         self.window.SpeedSignal.emit(0)
 
-        # Seek to frame
-        self.window.SeekSignal.emit(frame_number, True)
+        # Use scrub seeks while trimming, as with a paused playhead drag.
+        # Preroll/prefetch would compete with the next trim preview request.
+        self.window.SeekSignal.emit(frame_number, False)
+
+    def PreviewRazorFrame(self, item_id, frame_number, restore_frame, kind="clip"):
+        """Preview a hovered source without moving the timeline playhead."""
+        if kind == "clip":
+            source = self._clip_preview_source(item_id, frame_number)
+        else:
+            transition = Transition.get(id=item_id)
+            if not transition:
+                return False
+            reader = self._transition_mask_reader(transition.data)
+            path = absolute_media_path(reader.get("path")) if isinstance(reader, dict) else None
+            source = (path, frame_number) if path else None
+        if not source:
+            return False
+        path, frame_number = source
+        return self.window.preview_thread.queue_razor_preview(
+            frame_number, restore_frame, path, kind == "transition"
+        )
 
     @pyqtSlot(str, int)
     def PreviewTransitionFrame(self, transition_id, frame_number):
@@ -5204,8 +5284,8 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         self.window.LoadFilePreviewSignal.emit(preview_path, True)
         self.window.SpeedSignal.emit(0)
 
-        # Seek to frame
-        self.window.SeekSignal.emit(frame_number, True)
+        # Match clip trimming: defer preroll until returning to the timeline.
+        self.window.SeekSignal.emit(frame_number, False)
 
     @pyqtSlot(int)
     def SeekToKeyframe(self, frame_number):
@@ -5810,6 +5890,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
 
         # Callback function, to actually add the effect object
         def callback(self, effect_names, callback_data):
+            feedback_changed = False
             js_position = callback_data.get('position', 0.0)
             js_nearest_track = callback_data.get('track', 0)
 
@@ -5876,6 +5957,9 @@ class TimelineView(updates.UpdateInterface, ViewClass):
                     # Update clip data for project
                     self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
                     get_app().updates.apply_last_action_to_history(original_clip_data)
+                    feedback_changed = True
+            if feedback_changed:
+                record_feedback_action("effects")
 
         # Find position from javascript
         self.run_js(JS_SCOPE_SELECTOR + ".getJavaScriptPosition({}, {});"
@@ -5944,6 +6028,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
         effects.append(effect_json)
         self.update_clip_data(clip.data, only_basic_props=False, ignore_reader=True)
         get_app().updates.apply_last_action_to_history(original_clip_data)
+        record_feedback_action("effects")
 
     # Without defining this method, the 'copy' action doesn't show with cursor
     def dragMoveEvent(self, event):
@@ -6132,6 +6217,7 @@ class TimelineView(updates.UpdateInterface, ViewClass):
                     reader["height"] = 720
 
             preview_clip = Clip()
+            preview_clip.is_recording_preview = True
             preview_clip.id = preview_id
             try:
                 position = max(0.0, float(preview.get("position") or 0.0))

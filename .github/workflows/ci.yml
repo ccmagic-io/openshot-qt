@@ -11,7 +11,7 @@ jobs:
         shell: bash
     steps:
     - name: Check out code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v7
 
     - name: Install dependencies
       run: |
@@ -19,11 +19,19 @@ jobs:
         sudo apt update
         sudo apt install libopenshot-audio-dev libopenshot-dev python3-openshot
         sudo apt install qttranslations5-l10n libssl-dev xvfb
-        sudo apt install python3-pyqt5 python3-pyqt5.qtsvg python3-pyqt5.qtopengl python3-zmq python3-xdg
-        pip3 install setuptools wheel sentry-sdk
+        sudo apt install python3-pyqt5 python3-pyqt5.qtsvg python3-pyqt5.qtopengl python3-xdg
+        pip3 install setuptools wheel sentry-sdk dbus-next==0.2.3
         pip3 install cx_Freeze==7.0.0 distro defusedxml requests certifi chardet urllib3
 
     - name: Test
       env:
         QT_QPA_PLATFORM: offscreen
       run: python3 -m unittest discover -s src/tests -t src/tests --quiet
+
+    - name: Test package layout
+      env:
+        QT_QPA_PLATFORM: minimal
+      run: |
+        python3 setup.py build --build-base build/ppa-tests
+        cd build/ppa-tests/lib
+        python3 -m unittest discover --quiet

@@ -292,7 +292,16 @@ starting folder (options described below).
    File Import                       Default folder to choose when importing a file
    Save or Open Project              Default folder to choose when saving or opening a project file
    Video Export                      Default folder to choose when exporting a video
+   Unsaved Project Assets Folder     Folder for assets created before a project is saved (restart required)
    ================================  ==================
+
+On Linux, the unsaved assets folder defaults to ``~/Videos/.openshot-tmp`` when
+``~/Videos`` exists and the hidden child folder is writable. Otherwise, OpenShot
+uses ``~/.openshot_qt``, which is also the default on other platforms. You can
+choose a different folder in Preferences. Saving a project relocates its assets
+into the project's ``<project>_assets`` folder; subsequent titles and animations
+use that folder. These assets can include media needed by an unsaved project or
+crash recovery, so do not delete the folder as ordinary disposable cache data.
 
 .. table::
    :widths: 25 80
@@ -323,12 +332,12 @@ The Advanced tab includes ComfyUI integration and debugging options.
    * - Comfy UI URL
      - ``http://127.0.0.1:8188``
      - URL of your local or remote ComfyUI server
-   * - Debug Mode (Port)
-     - 5556
-     - Port used by debug logging features
-   * - Debug Mode (Verbose)
+   * - User Interface Debug Logging
      - Disabled
-     - Enable verbose debugging output
+     - Record interface and project details in ``openshot-qt.log``. The matching ``--debug-ui`` (or ``--debug``) argument enables these details for one launch, including terminal output. See :ref:`logging_ref`.
+   * - Video & Audio Engine Debug Logging
+     - Disabled
+     - Record video and audio processing details in ``libopenshot.log``. The matching ``--debug-engine`` argument enables these details for one launch, including terminal output. Logs can grow quickly; turn off when finished. See :ref:`logging_ref`.
    * - Send Anonymous Metrics and Errors
      - Enabled
      - Send anonymous telemetry and error reports

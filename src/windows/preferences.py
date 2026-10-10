@@ -281,17 +281,18 @@ class Preferences(QDialog):
                     widget.setToolTip(param["title"])
                     widget.valueChanged.connect(functools.partial(self.spinner_value_changed, param))
 
-                elif param["type"] == "text" or param["type"] == "browse":
+                elif param["type"] in ("text", "browse", "browse-folder"):
                     # create QLineEdit
                     widget = QLineEdit()
                     widget.setText(_(param["value"]))
                     widget.setObjectName(param["setting"])
                     widget.textChanged.connect(functools.partial(self.text_value_changed, widget, param))
 
-                    if param["type"] == "browse":
+                    if param["type"] in ("browse", "browse-folder"):
                         # Add filesystem browser button
                         extraWidget = QPushButton(_("Browse..."))
-                        extraWidget.clicked.connect(functools.partial(self.selectExecutable, widget, param))
+                        callback = self.selectFolder if param["type"] == "browse-folder" else self.selectExecutable
+                        extraWidget.clicked.connect(functools.partial(callback, widget, param))
                     elif param.get("setting") == "comfy-ui-url":
                         # Add an explicit connectivity check for ComfyUI URL.
                         extraWidget = QPushButton(_("Check"))
@@ -307,6 +308,10 @@ class Preferences(QDialog):
                         widget.setCheckState(Qt.Checked)
                     else:
                         widget.setCheckState(Qt.Unchecked)
+                    if param["setting"] in ("debug-ui", "debug-mode"):
+                        tooltip = self.logging_tooltip(param["setting"])
+                        widget.setToolTip(tooltip)
+                        label.setToolTip(tooltip)
                     widget.stateChanged.connect(functools.partial(self.bool_value_changed, widget, param))
 
                 elif param["type"] == "dropdown":
@@ -588,6 +593,13 @@ class Preferences(QDialog):
             if widget:
                 widget.setEnabled(enabled)
 
+    def selectFolder(self, widget, param):
+        folder = QFileDialog.getExistingDirectory(
+            self, get_app()._tr("Select assets folder"),
+            self.s.get(param["setting"]) or info.HOME_PATH)
+        if folder:
+            widget.setText(folder)
+
     def selectExecutable(self, widget, param):
         _ = get_app()._tr
 
@@ -666,6 +678,18 @@ class Preferences(QDialog):
         """Apply current cache preference values to the active session."""
         get_app().window.InitCacheSettings()
 
+    def logging_tooltip(self, setting):
+        from classes import log_config
+        _ = get_app()._tr
+        if setting == "debug-ui":
+            description = _("Log interface details")
+            component = "python"
+        else:
+            description = _("Log video and audio details")
+            component = "native"
+        override = log_config.preference_description(self.s.get(setting), component)
+        return description + ("\n" + override if override else "")
+
     def bool_value_changed(self, widget, param, state):
         # Save setting
         if state == Qt.Checked:
@@ -674,13 +698,12 @@ class Preferences(QDialog):
             self.s.set(param["setting"], False)
 
         # Trigger specific actions
-        if param["setting"] == "debug-mode":
-            # Update debug setting of timeline
-            log.info("Setting debug-mode to %s", state == Qt.Checked)
-            debug_enabled = (state == Qt.Checked)
-
-            # Enable / Disable logger
-            openshot.ZmqLogger.Instance().Enable(debug_enabled)
+        if param["setting"] in ("debug-ui", "debug-mode"):
+            log.info("Setting %s to %s", param["setting"], state == Qt.Checked)
+            from classes import logger_libopenshot
+            logger_libopenshot.configure(
+                self.s.get("debug-mode"), ui_debug=self.s.get("debug-ui"))
+            widget.setToolTip(self.logging_tooltip(param["setting"]))
 
         elif param["setting"] == "enable-auto-save":
             # Toggle autosave

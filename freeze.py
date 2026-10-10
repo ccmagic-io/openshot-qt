@@ -61,7 +61,7 @@ from shutil import copytree, rmtree, copy
 from cx_Freeze import setup, Executable
 import cx_Freeze
 import shutil
-from installer.version_parser import parse_version_info, parse_build_name
+from installer.version_parser import parse_version_info, parse_build_name, write_build_metadata
 
 PATH = os.path.dirname(os.path.realpath(__file__))  # Primary openshot folder
 sys.path.insert(0, os.path.join(PATH, "src"))
@@ -102,7 +102,6 @@ python_packages = ["classes.ai_modules",
                    "logging",
                    "urllib",
                    "requests",
-                   "zmq",
                    "webbrowser",
                    "json",
                    ]
@@ -240,13 +239,12 @@ if artifact_path:
                     # No extension, parse version info
                     version_info.update(parse_version_info(git_log_filepath))
 
-# If version info found (create src/settings/version.json file)
+# Always write provenance, including when a local build has no CI version files.
 if version_info:
     # Calculate build name from version info
     version_info["build_name"] = parse_build_name(version_info, git_branch_name)
-    version_path = os.path.join(openshot_copy_path, "settings", "version.json")
-    with open(version_path, "w") as f:
-        f.write(json.dumps(version_info, indent=4))
+version_path = os.path.join(openshot_copy_path, "settings", "version.json")
+write_build_metadata(version_path, version_info)
 
 if sys.platform == "win32":
     # Define alternate terminal-based executable
@@ -315,7 +313,8 @@ elif sys.platform == "linux":
 
     # Find all related SO files
     for filename in find_files(libopenshot_path, ["*openshot*.so*"]):
-        if '_' in filename or filename.count(".") == 2:
+        if ('_' in filename or filename.count(".") == 2
+                or os.path.basename(filename) == "libopenshot-wayland-capture.so"):
             external_so_files.append((filename, os.path.relpath(filename, start=libopenshot_path)))
 
     # Add libresvg (if found)
@@ -354,6 +353,15 @@ elif sys.platform == "linux":
     # Add custom launcher script for frozen linux version
     src_files.append((os.path.join(PATH, "installer", "launch-linux.sh"), "launch-linux.sh"))
 
+    # Pure Python portal client (QtDBus cannot marshal the nested filter types
+    # from Python). Fail the build rather than silently ship only Qt fallbacks.
+    try:
+        import dbus_next
+    except ImportError as exc:
+        raise RuntimeError("Linux AppImage builds require: pip install dbus-next==0.2.3") from exc
+    log.info("Linux portal client: %s", dbus_next.__file__)
+    python_packages.append("dbus_next")
+
     # Get a list of all openshot.so dependencies (scan these libraries for their dependencies)
     qt_mod_files = []
     from importlib import import_module
@@ -369,6 +377,7 @@ elif sys.platform == "linux":
         log.warning("Skipping _ssl module: %s", ex)
     for lib_name in [
             os.path.join(libopenshot_path, "libopenshot.so"),
+            os.path.join(libopenshot_path, "libopenshot-wayland-capture.so"),
             "/usr/local/lib/libresvg.so",
             ARCHLIB + "qt5/plugins/platforms/libqxcb.so"
             ]:
@@ -537,6 +546,10 @@ build_exe_options["excludes"] = ["distutils",
                                  "{}.QtWebKitWidgets".format(QT_BINDING_PACKAGE)]
 if sys.platform == "darwin":
     build_exe_options["excludes"].append("sentry_sdk.integrations.django")
+elif sys.platform == "linux":
+    # The portal client uses asyncio; its optional GLib adapter must not pull
+    # PyGObject and GTK into the AppImage.
+    build_exe_options["excludes"].append("gi")
 
 # Set options
 build_options["build_exe"] = build_exe_options

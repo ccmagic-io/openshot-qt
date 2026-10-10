@@ -130,6 +130,14 @@ class OpenShotApp(QApplication):
         # Init data objects
         self.settings = settings.SettingStore(parent=self)
         self.settings.load()
+        assets_path = info.configure_asset_defaults(self.settings.get("unsaved-assets-path"))
+        log.info("Unsaved project assets: %s", assets_path)
+        if self.mode != "unittest":
+            from classes import logger_libopenshot
+            logger_libopenshot.configure(
+                self.settings.get("debug-mode"), initialize=True,
+                ui_debug=self.settings.get("debug-ui"))
+            self.aboutToQuit.connect(logger_libopenshot.close)
         self.project = project_data.ProjectDataStore()
         self.updates = updates.UpdateManager()
         # It is important that the project is the first listener if the key gets update
@@ -165,6 +173,8 @@ class OpenShotApp(QApplication):
             log.info("-" * 48)
 
             log.info("openshot-qt version: %s" % info.VERSION)
+            from classes.distribution import distribution_label
+            log.info("distribution: %s", distribution_label())
             log.info("libopenshot version: %s" % openshot.OPENSHOT_VERSION_FULL)
             log.info("platform: %s" % platform.platform())
             log.info("processor: %s" % platform.processor())
@@ -222,7 +232,7 @@ class OpenShotApp(QApplication):
         Initialize GUI and main window.
         :return: bool: True if the GUI has no errors, False if we fail to initialize the GUI
         """
-        from classes import language, sentry, logger_libopenshot
+        from classes import language, sentry
 
         _ = self._tr
         info = self.info
@@ -258,10 +268,6 @@ class OpenShotApp(QApplication):
 
         # Display any outstanding startup messages
         self.show_errors()
-
-        # Start libopenshot logging thread
-        self.logger_libopenshot = logger_libopenshot.LoggerLibOpenShot()
-        self.logger_libopenshot.start()
 
         # Track which dockable window received a context menu
         self.context_menu_object = None

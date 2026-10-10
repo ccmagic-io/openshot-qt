@@ -338,6 +338,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
 
     def clearTransformState(self):
         """Clear all transform-related state to avoid using invalid clip/effect objects"""
+        self._restore_transform_playback_cache()
         self.transforming_clip = None
         self.transforming_clips.clear()
         self.transforming_clip_objects.clear()
@@ -488,9 +489,9 @@ class VideoWidget(QWidget, updates.UpdateInterface):
 
         # Display the playback speed in widget title
         speed = 0.0
-        mode = self.win.preview_thread.player.Mode()
-        if mode != openshot.PLAYBACK_PAUSED:
-            speed = self.win.preview_thread.player.Speed()
+        preview_thread = getattr(self.win, "preview_thread", None)
+        if preview_thread and preview_thread.player.Mode() != openshot.PLAYBACK_PAUSED:
+            speed = preview_thread.player.Speed()
 
         # Find parent dockWidget (if any)
         dock = None
@@ -1043,10 +1044,24 @@ class VideoWidget(QWidget, updates.UpdateInterface):
             self.original_clip_data_map = {}
             self.original_effect_data = None
 
-        # Disable video caching during drag operation (for performance reasons)
-        if not self._is_playing():
+        # Live edits invalidate the frames the background cache worker is filling.
+        # Suspend that work during transforms so it does not compete with playback
+        # and mouse updates for the native timeline's render lock.
+        if (self._is_playing() and not self.region_enabled
+                and (self.transforming_clips or self.transforming_effect)):
+            settings = openshot.Settings.Instance()
+            if getattr(self, "_transform_playback_cache_state", None) is None:
+                self._transform_playback_cache_state = settings.ENABLE_PLAYBACK_CACHING
+            settings.ENABLE_PLAYBACK_CACHING = False
+        elif not self._is_playing():
             openshot.Settings.Instance().ENABLE_PLAYBACK_CACHING = False
         log.debug('mousePressEvent: Stop caching frames on timeline')
+
+    def _restore_transform_playback_cache(self):
+        previous = getattr(self, "_transform_playback_cache_state", None)
+        self._transform_playback_cache_state = None
+        if previous is not None and self._is_playing():
+            openshot.Settings.Instance().ENABLE_PLAYBACK_CACHING = previous
 
     def mouseReleaseEvent(self, event):
         event.accept()
@@ -1165,6 +1180,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
         self.original_clip_data = None
         self.original_clip_data_map = {}
         self.original_effect_data = None
+        self._restore_transform_playback_cache()
         self.setCursor(Qt.ArrowCursor)
 
     def rotateCursor(self, pixmap, rotation, shear_x, shear_y):
@@ -1198,7 +1214,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
         if (self.transforming_effect and self.transforming_effect_object and
             getattr(self.transforming_effect_object.info, 'class_name', '') == 'Crop'):
             # Test the screen-space rect first
-            if self.cropOriginHandleScreen and self.cropOriginHandleScreen.contains(event.pos()):
+            if self.cropOriginHandleScreen and self.cropOriginHandleScreen.contains(QPointF(event.pos())):
                 cursor = self.rotateCursor(self.cursors.get('hand'), rotation, shear_x, shear_y)
                 self.hover_cursor = cursor
                 self.hover_transform_mode = 'origin'
@@ -1522,10 +1538,9 @@ class VideoWidget(QWidget, updates.UpdateInterface):
                         layout_height) = self._clip_location_geometry(
                             base_w, base_h, self.transforming_clip, raw_properties, viewport_rect)
 
-                    # Match libopenshot's location contract: Crop uses the
-                    # distance to the offscreen edge, while all other scale
-                    # modes retain canvas-relative coordinates.
-                    if self.transforming_clip.data['scale'] == openshot.SCALE_CROP:
+                    # Match libopenshot, including the coordinate convention
+                    # retained when importing projects from older releases.
+                    if self._uses_geometry_location(self.transforming_clip):
                         current_x_offset = self._location_offset(
                             location_x, anchored_x - layout_x, layout_width, scaled_w)
                         current_y_offset = self._location_offset(
@@ -2134,7 +2149,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
 
         if not found_point and new_value is not None:
             clip_updated = True
-            log.info("Creating new point at X=%s", frame_number)
+            log.debug("Creating new point at X=%s", frame_number)
             c.data[property_key]["Points"].append({
                 'co': {'X': frame_number, 'Y': float(new_value)},
                 'interpolation': openshot.BEZIER
@@ -2259,7 +2274,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
                     })
 
             if not found_point and new_value is not None:
-                log.info("Creating new point at X=%s", frame_number)
+                log.debug("Creating new point at X=%s", frame_number)
                 points_list.append({
                     'co': {'X': frame_number, 'Y': float(new_value)},
                     'interpolation': openshot.BEZIER
@@ -2399,6 +2414,13 @@ class VideoWidget(QWidget, updates.UpdateInterface):
         return width, height
 
     @staticmethod
+    def _uses_geometry_location(clip):
+        """Match the renderer's per-clip compatibility convention."""
+        coordinates = clip.data.get("location_coordinate_system", "auto")
+        return coordinates == "geometry" or (
+            coordinates != "canvas" and clip.data['scale'] == openshot.SCALE_CROP)
+
+    @staticmethod
     def _location_offset(location, anchored_position, canvas_size, clip_size):
         """Match libopenshot normalized location semantics for one axis."""
         location = float(location)
@@ -2532,7 +2554,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
 
         location_x = float(raw_properties.get('location_x', {}).get('value', 0.0))
         location_y = float(raw_properties.get('location_y', {}).get('value', 0.0))
-        if clip.data['scale'] == openshot.SCALE_CROP:
+        if self._uses_geometry_location(clip):
             x += self._location_offset(location_x, anchored_x - layout_x, layout_width, scaled_width)
             y += self._location_offset(location_y, anchored_y - layout_y, layout_height, scaled_height)
         else:
@@ -2607,19 +2629,44 @@ class VideoWidget(QWidget, updates.UpdateInterface):
                 return object_id, object_props
         return None, None
 
-    def refreshTriggered(self):
+    def refreshTriggered(self, refresh_project=True):
         """Signal to refresh viewport (i.e. a property might have changed that effects the preview)"""
 
-        # Update reference to clip(s)
-        if self.transforming_clips:
-            self.transforming_clips = [Clip.get(id=c.id) for c in self.transforming_clips if Clip.get(id=c.id)]
-            if self.transforming_clips:
-                self.transforming_clip = self.transforming_clips[0]
-            else:
-                self.transforming_clip = None
+        # Split Clip and region dialogs own independent preview timelines and
+        # have no project transform selection to rebind.
+        if not getattr(self, "watch_project", True):
+            return
+
+        # SWIG references do not keep timeline-owned objects alive. Undo/redo
+        # can delete or replace them, so resolve both sides by their Python IDs.
+        timeline = self.win.timeline_sync.timeline
+        clips, objects = [], []
+        for selected in self.transforming_clips:
+            clip = Clip.get(id=selected.id) if refresh_project else selected
+            obj = timeline.GetClip(selected.id)
+            if clip and obj:
+                clips.append(clip)
+                objects.append(obj)
+        self.transforming_clips = clips
+        self.transforming_clip_objects = objects
 
         if self.transforming_effect:
-            self.transforming_effect = Effect.get(id=self.transforming_effect.id)
+            clip_id = self.transforming_clip.id if self.transforming_clip else None
+            effect_id = self.transforming_effect.id
+            clip = (Clip.get(id=clip_id) if refresh_project else self.transforming_clip) if clip_id else None
+            obj = timeline.GetClip(clip_id) if clip_id else None
+            effect = Effect.get(id=effect_id) if refresh_project else self.transforming_effect
+            effect_obj = timeline.GetClipEffect(effect_id)
+            if clip and obj and effect and effect_obj:
+                self.transforming_clip = clip
+                self.transforming_clip_object = obj
+                self.transforming_effect = effect
+                self.transforming_effect_object = effect_obj
+                return
+        self.transforming_effect = None
+        self.transforming_effect_object = None
+        self.transforming_clip = clips[0] if clips else None
+        self.transforming_clip_object = objects[0] if objects else None
 
     def transformTriggered(self, clip_ids):
         """Handle the transform signal when it's emitted. Supports multiple clip IDs."""
@@ -2910,24 +2957,10 @@ class VideoWidget(QWidget, updates.UpdateInterface):
             self.delayed_resize_timer.start()
             return
 
-        # Ensure width & height are divisible by 2 (round decimals).
-        # Trying to find the closest even number to the requested aspect ratio
-        # so that both width and height are divisible by 2. This is to prevent some
-        # strange phantom scaling lines on the edges of the preview window.
-
-        # Scale project size (with aspect ratio) to the delayed widget size
-        project_size = QSize(get_app().project.get("width"), get_app().project.get("height"))
-        project_size.scale(self.delayed_size, Qt.KeepAspectRatio)
-
-        if project_size.height() > 0:
-            # Ensure width and height are divisible by 2
-            ratio = float(project_size.width()) / float(project_size.height())
-            even_width = round(project_size.width() / 2.0) * 2
-            even_height = round(round(even_width / ratio) / 2.0) * 2
-            project_size = QSize(int(even_width), int(even_height))
-
-        # Emit signal that video widget changed size
-        self.win.MaxSizeChanged.emit(project_size)
+        # Send logical widget bounds. The receiver applies DPI scaling, then
+        # libopenshot fits and aligns the actual preview dimensions. Rounding
+        # here can be undone by either of those later operations.
+        self.win.MaxSizeChanged.emit(QSize(self.delayed_size))
 
     # Capture wheel event to alter zoom/scale of widget
     def wheelEvent(self, event):
@@ -2949,7 +2982,7 @@ class VideoWidget(QWidget, updates.UpdateInterface):
             self.pan_y = 0.0
         elif not keep_centered and old_zoom > 0.0:
             scale = self.zoom / old_zoom
-            anchor = QPointF(event.pos())
+            anchor = QPointF(event.position() if hasattr(event, "position") else event.pos())
             old_center = old_viewport.center()
             new_center = anchor + ((old_center - anchor) * scale)
             window_center = QRectF(QPointF(0, 0), QSizeF(self.width(), self.height())).center()

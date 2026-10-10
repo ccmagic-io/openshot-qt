@@ -99,7 +99,7 @@ class QueryTests(unittest.TestCase):
         # Insert some clips into the project data
         for num in range(5):
             # Create clip
-            c = openshot.Clip(os.path.join(info.IMAGES_PATH, "AboutLogo.png"))
+            c = openshot.Clip(os.path.join(info.IMAGES_PATH, "cache", "openshot_logo.png"))
             c.Position(num * 10.0)
             c.End(5.0)
 
@@ -126,7 +126,7 @@ class QueryTests(unittest.TestCase):
             # Insert into project data
             query_file = File()
             query_file.data = file_data
-            query_file.data["path"] = os.path.join(info.IMAGES_PATH, "AboutLogo.png")
+            query_file.data["path"] = os.path.join(info.IMAGES_PATH, "cache", "openshot_logo.png")
             query_file.data["media_type"] = "image"
             query_file.save()
 
@@ -156,19 +156,13 @@ class QueryTests(unittest.TestCase):
         # Don't keep the full query objects around
         del clips
 
-    @classmethod
-    def tearDownClass(cls):
-        """ Clean up after running all tests in the class. """
-        if getattr(cls, "_owns_app", False) and cls.app:
-            cls.app.quit()
-
     def test_add_clip(self):
 
         # Find number of clips in project
         num_clips = len(Clip.filter())
 
         # Create clip
-        c = openshot.Clip(os.path.join(info.IMAGES_PATH, "AboutLogo.png"))
+        c = openshot.Clip(os.path.join(info.IMAGES_PATH, "cache", "openshot_logo.png"))
         clip_data = json.loads(c.Json())
 
         # Insert into project data
@@ -366,7 +360,7 @@ class QueryTests(unittest.TestCase):
         # Insert into project data
         query_file = File()
         query_file.data = file_data
-        query_file.data["path"] = os.path.join(info.IMAGES_PATH, "AboutLogo.png")
+        query_file.data["path"] = os.path.join(info.IMAGES_PATH, "cache", "openshot_logo.png")
         query_file.data["media_type"] = "image"
 
         query_file.save()
