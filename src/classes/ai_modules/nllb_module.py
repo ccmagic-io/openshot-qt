@@ -95,15 +95,18 @@ class NLLBModule(BaseModule):
     def process_nllb_result(self, response):
         if response.get("status") == True:
             self.log_info(f"NLLB job {self.job_id} result downloaded successfully.")
-            # Assuming the downloaded file is a zip, you might want to extract it here.
-            # For now, we just log the success and call run_after to reset the module state.
-            with ZipFile(self.output_directory + "/" + self.job_id + ".zip", 'r') as zip_file:
-                zip_file.extractall(self.output_directory + "/" + self.job_id)
-            os.remove(self.output_directory + "/" + self.job_id + ".zip")  # Clean up the zip file after extraction
-
-            output_path = self.output_directory + "/" + self.job_id + "/" + "output.txt"
-            with open(output_path, "r") as f:
-                self._last_outputs[0] = f.read()
+            try:
+                # Assuming the downloaded file is a zip, you might want to extract it here.
+                with ZipFile(self.output_directory + "/" + self.job_id + ".zip", 'r') as zip_file:
+                    zip_file.extractall(self.output_directory + "/" + self.job_id)
+                os.remove(self.output_directory + "/" + self.job_id + ".zip")  # Clean up the zip file after extraction
+                output_path = self.output_directory + "/" + self.job_id + "/" + "output.txt"
+                with open(output_path, "r", encoding="utf-8") as f:
+                    self._last_outputs[0] = f.read().replace("\n", " ").replace("\r", " ").replace("\t", " ").strip()
+            except Exception as e:
+                self.log_error(f"Error reading output file {output_path}: {e}")
+                self._last_outputs[0] = None
+                exit(1)
             self.log_info(f"NLLB module outputs: {self._last_outputs}")
             super().run_after()  # Reset running state after execution
 
